@@ -22,7 +22,8 @@ LEDGER_INK = "404040"
 LEDGER_RULE = Side(style="thin", color="B7B7B7")
 LEDGER_TOTAL_RULE = Side(style="medium", color="666666")
 DETAIL_START_COLUMNS = (1, 5)
-SUMMARY_END_COLUMN = 13
+SHARED_VALUE_START_COLUMNS = (2, 5, 8)
+SUMMARY_END_COLUMN = 10
 COUNT_FORMAT = '"("0")"'
 MONEY_FORMAT = "#,##0_);[Red](#,##0)"
 
@@ -59,8 +60,7 @@ def _period_label(months: list[str]) -> str:
 def _set_summary_heading(sheet, company_name: str, months: list[str]) -> None:
     headings = (
         (1, 4, _period_label(months), "left", 10),
-        (5, 9, company_name, "center", 12),
-        (10, 13, "부가세 집계표", "right", 10),
+        (9, 10, "부가세 집계표", "right", 10),
     )
     for start_column, end_column, text, alignment, size in headings:
         sheet.merge_cells(
@@ -285,7 +285,90 @@ def _write_total_amount_table(
 
 
 def _ordered_categories(settings: CompanySettings) -> list[str]:
-    return [settings.account_146_label, "원재료(도급)", "제조경비", "도급경비", "기타", "고정"]
+    return [settings.account_146_label, "원재료(도급)", "제조경비", "도급경비", "기타"]
+
+
+def _write_shared_month_band(
+    sheet,
+    title_row: int,
+    items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None],
+    months: list[str],
+    *,
+    marker: str = "",
+    first_title_in_month_column: bool = False,
+) -> int:
+    if marker and not first_title_in_month_column:
+        marker_cell = sheet.cell(title_row, 1, marker)
+        _style_ledger_cell(marker_cell, bold=True)
+        marker_cell.alignment = Alignment(horizontal="center", vertical="center")
+        marker_cell.border = Border(bottom=LEDGER_TOTAL_RULE)
+
+    for slot, item in enumerate(items):
+        if item is None:
+            continue
+        title, _frame, _key_column, _key, _exempt, _blank = item
+        value_start = SHARED_VALUE_START_COLUMNS[slot]
+        if slot == 0 and first_title_in_month_column:
+            title_start, title_end = 1, 4
+            title_text = f"{marker}  {title}" if marker else title
+        else:
+            title_start = value_start
+            title_end = value_start + 2
+            title_text = title
+        sheet.merge_cells(
+            start_row=title_row,
+            start_column=title_start,
+            end_row=title_row,
+            end_column=title_end,
+        )
+        title_cell = sheet.cell(title_row, title_start, title_text)
+        _style_ledger_cell(title_cell, bold=True)
+        title_cell.font = Font(name="맑은 고딕", size=10, bold=True, color=LEDGER_INK)
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+        title_cell.border = Border(bottom=LEDGER_TOTAL_RULE)
+
+    first_data_row = title_row + 1
+    for month_index, month in enumerate(months):
+        row = first_data_row + month_index
+        month_cell = sheet.cell(row, 1, _month_label(month, months))
+        _style_ledger_cell(month_cell)
+        month_cell.alignment = Alignment(horizontal="center", vertical="center")
+        for slot, item in enumerate(items):
+            if item is None:
+                continue
+            _title, frame, key_column, key, exempt, blank = item
+            fields: tuple[str | None, ...] = (
+                "count",
+                "supply_amount",
+                None if exempt else "tax_amount",
+            )
+            for offset, field in enumerate(fields):
+                cell = sheet.cell(row, SHARED_VALUE_START_COLUMNS[slot] + offset)
+                if not blank and field is not None:
+                    cell.value = _lookup(frame, key_column, key, month, field)
+                _style_ledger_cell(cell)
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
+
+    total_row = first_data_row + len(months)
+    total_label = sheet.cell(total_row, 1, "계")
+    _style_ledger_cell(total_label, bold=True, total=True)
+    total_label.alignment = Alignment(horizontal="center", vertical="center")
+    for slot, item in enumerate(items):
+        if item is None:
+            continue
+        _title, _frame, _key_column, _key, exempt, blank = item
+        fields = ("count", "supply_amount", None if exempt else "tax_amount")
+        for offset, field in enumerate(fields):
+            column = SHARED_VALUE_START_COLUMNS[slot] + offset
+            cell = sheet.cell(total_row, column)
+            if not blank and field is not None:
+                letter = get_column_letter(column)
+                cell.value = f"=SUM({letter}{first_data_row}:{letter}{total_row - 1})"
+            _style_ledger_cell(cell, bold=True, total=True)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
+    return total_row
 
 
 def _build_summary(workbook: Workbook, result: ProcessingResult, settings: CompanySettings) -> None:
@@ -294,303 +377,217 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     months = sorted(result.transactions["month"].dropna().astype(str).unique())
     _set_summary_heading(sheet, settings.name, months)
 
-    purchase_items: list[tuple[str, pd.DataFrame, str, str, bool]] = []
-    for category in _ordered_categories(settings):
-        if _has_values(result.purchase_by_category, "account_category", category):
-            purchase_items.append(
-                (category, result.purchase_by_category, "account_category", category, False)
-            )
+    rows_per_band = len(months) + 3
+    purchase_categories = [
+        category
+        for category in _ordered_categories(settings)
+        if _has_values(result.purchase_by_category, "account_category", category)
+    ]
+    if _has_values(result.purchase_by_category, "account_category", "고정"):
+        purchase_categories.insert(min(2, len(purchase_categories)), "고정")
+
+    purchase_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = [
+        (category, result.purchase_by_category, "account_category", category, False, False)
+        for category in purchase_categories
+    ]
+    purchase_items.append(
+        ("세금계산서 매입계", result.purchase_summary, "item", "세금계산서 매입계", False, False)
+    )
 
     purchase_title_row = 3
-    rows_per_band = len(months) + 3
-    last_purchase_detail_row = purchase_title_row - 1
-    for item_index in range(0, len(purchase_items), len(DETAIL_START_COLUMNS)):
-        band = item_index // len(DETAIL_START_COLUMNS)
-        title_row = purchase_title_row + band * rows_per_band
-        for slot, (title, frame, key_column, key, exempt) in enumerate(
-            purchase_items[item_index : item_index + len(DETAIL_START_COLUMNS)]
-        ):
-            start_column = DETAIL_START_COLUMNS[slot]
-            total_row = _write_month_table(
+    purchase_total_rows: list[int] = []
+    for item_index in range(0, len(purchase_items), 3):
+        title_row = purchase_title_row + (item_index // 3) * rows_per_band
+        purchase_total_rows.append(
+            _write_shared_month_band(
                 sheet,
                 title_row,
-                start_column,
-                title,
-                frame,
-                key_column,
-                key,
+                purchase_items[item_index : item_index + 3],
                 months,
-                marker="①" if item_index == 0 and slot == 0 else "",
-                exempt=exempt,
+                marker="①" if item_index == 0 else "",
             )
-            last_purchase_detail_row = max(last_purchase_detail_row, total_row)
-
-    purchase_total_row: int | None = None
-    purchase_summary_column = 9
-    if _has_values(result.purchase_summary, "item", "세금계산서 매입계"):
-        purchase_total_row = _write_compact_month_table(
-            sheet,
-            purchase_title_row,
-            purchase_summary_column,
-            "①  세금계산서 매입계" if not purchase_items else "세금계산서 매입계",
-            result.purchase_summary,
-            "item",
-            "세금계산서 매입계",
-            months,
         )
 
-    purchase_end_row = max(last_purchase_detail_row, purchase_total_row or 2)
-    invoice_total_row = purchase_total_row
-    if purchase_total_row is not None and _has_values(result.purchase_summary, "item", "고정"):
-        adjustment_row = purchase_total_row + 1
+    invoice_index = len(purchase_items) - 1
+    invoice_slot = invoice_index % 3
+    invoice_total_row = purchase_total_rows[invoice_index // 3]
+    invoice_supply_column = SHARED_VALUE_START_COLUMNS[invoice_slot] + 1
+    invoice_tax_column = SHARED_VALUE_START_COLUMNS[invoice_slot] + 2
+    invoice_supply_ref = f"{get_column_letter(invoice_supply_column)}{invoice_total_row}"
+    invoice_tax_ref = f"{get_column_letter(invoice_tax_column)}{invoice_total_row}"
+
+    def write_summary_row(
+        row_number: int,
+        label: str,
+        supply_value: object,
+        tax_value: object,
+        *,
+        total: bool = False,
+    ) -> None:
+        for column, value in zip((5, 6, 7), (label, supply_value, tax_value)):
+            cell = sheet.cell(row_number, column, value)
+            _style_ledger_cell(cell, bold=True, total=total)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            if column > 5:
+                cell.number_format = MONEY_FORMAT
+
+    summary_row = invoice_total_row + 1
+    base_supply_ref = invoice_supply_ref
+    base_tax_ref = invoice_tax_ref
+    if _has_values(result.purchase_summary, "item", "고정"):
+        adjustment_row = summary_row
         general_row = adjustment_row + 1
         fixed_row = general_row + 1
-        invoice_total_row = fixed_row + 1
-        split_rows = (
-            (
-                adjustment_row,
-                "단수차이 조정",
-                f"=J{purchase_total_row}",
-                f"=ROUNDDOWN(J{purchase_total_row}*0.1,0)",
-            ),
-            (
-                general_row,
-                "일반",
-                _total_value(result.purchase_summary, "item", "일반매입", "supply_amount"),
-                f"=K{adjustment_row}-K{fixed_row}",
-            ),
-            (
-                fixed_row,
-                "고정",
-                _total_value(result.purchase_summary, "item", "고정", "supply_amount"),
-                _total_value(result.purchase_summary, "item", "고정", "tax_amount"),
-            ),
-            (
-                invoice_total_row,
-                "계",
-                f"=J{general_row}+J{fixed_row}",
-                f"=K{general_row}+K{fixed_row}",
-            ),
+        split_total_row = fixed_row + 1
+        write_summary_row(
+            adjustment_row,
+            "단수차이 조정",
+            f"={invoice_supply_ref}",
+            f"=ROUNDDOWN(F{adjustment_row}*0.1,0)",
         )
-        for row, title, supply_value, tax_value in split_rows:
-            for column, value in zip(
-                range(purchase_summary_column, purchase_summary_column + 3),
-                (title, supply_value, tax_value),
-            ):
-                cell = sheet.cell(row, column, value)
-                _style_ledger_cell(cell, bold=True, total=title == "계")
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-                if column > purchase_summary_column:
-                    cell.number_format = MONEY_FORMAT
-        purchase_end_row = max(purchase_end_row, invoice_total_row)
-
-    other_items = [
-        (title, key)
-        for title, key in (("카드외", "카드외"), ("의제매입세액", "의제매입세액"))
-        if _has_values(result.purchase_summary, "item", key)
-    ]
-    other_total_row: int | None = None
-    if other_items:
-        other_title_row = purchase_end_row + 2
-        other_detail_end_row = other_title_row - 1
-        for slot, (title, key) in enumerate(other_items):
-            other_detail_end_row = max(
-                other_detail_end_row,
-                _write_month_table(
-                    sheet,
-                    other_title_row,
-                    DETAIL_START_COLUMNS[slot],
-                    title,
-                    result.purchase_summary,
-                    "item",
-                    key,
-                    months,
-                    marker="②" if slot == 0 else "",
-                ),
-            )
-        other_total_row = _write_compact_month_table(
-            sheet,
-            other_title_row,
-            purchase_summary_column,
-            "그 밖의 공제매입세액",
-            result.purchase_summary,
-            "item",
-            "그 밖의 공제매입세액",
-            months,
+        write_summary_row(
+            general_row,
+            "일반",
+            _total_value(result.purchase_summary, "item", "일반매입", "supply_amount"),
+            f"=G{adjustment_row}-G{fixed_row}",
         )
-        purchase_end_row = max(other_detail_end_row, other_total_row)
-
-    if _has_values(result.purchase_summary, "item", "매입세액 합계"):
-        summary_start_row = purchase_end_row + 1
-        overall_row = summary_start_row
-        total_references = [
-            row
-            for row in (invoice_total_row, other_total_row)
-            if row is not None
-        ]
-        overall_values = ["계"]
-        for column in (10, 11):
-            letter = get_column_letter(column)
-            overall_values.append(
-                "=" + "+".join(f"{letter}{row}" for row in total_references)
-            )
-        for column, value in zip(
-            range(purchase_summary_column, purchase_summary_column + 3),
-            overall_values,
-        ):
-            cell = sheet.cell(overall_row, column, value)
-            _style_ledger_cell(cell, bold=True, total=True)
-            cell.alignment = Alignment(horizontal="right", vertical="center")
-            if column > purchase_summary_column:
-                cell.number_format = MONEY_FORMAT
-
-        deduction_rows: list[int] = []
-        row = overall_row + 1
-        for title in ("불공", "공통"):
-            if _has_values(result.purchase_summary, "item", title):
-                deduction_rows.append(row)
-                values = (
-                    title,
-                    _total_value(result.purchase_summary, "item", title, "supply_amount"),
-                    _total_value(result.purchase_summary, "item", title, "tax_amount"),
-                )
-                for column, value in zip(
-                    range(purchase_summary_column, purchase_summary_column + 3),
-                    values,
-                ):
-                    cell = sheet.cell(row, column, value)
-                    _style_ledger_cell(cell, bold=True)
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                    if column > purchase_summary_column:
-                        cell.number_format = MONEY_FORMAT
-                row += 1
-
-        deduction_total_row = row
-        deduction_values = ["차감계"]
-        for column in (10, 11):
-            letter = get_column_letter(column)
-            deduction_values.append(
-                f"={letter}{overall_row}"
-                + "".join(f"-{letter}{deduction_row}" for deduction_row in deduction_rows)
-            )
-        for column, value in zip(
-            range(purchase_summary_column, purchase_summary_column + 3),
-            deduction_values,
-        ):
-            cell = sheet.cell(row, column, value)
-            _style_ledger_cell(cell, bold=True, total=True)
-            cell.alignment = Alignment(horizontal="right", vertical="center")
-            if column > purchase_summary_column:
-                cell.number_format = MONEY_FORMAT
-        purchase_end_row = deduction_total_row
-
-        deduction_items = [
-            title
-            for title in ("불공", "공통")
-            if _has_values(result.purchase_summary, "item", title)
-        ]
-        if deduction_items:
-            deduction_title_row = purchase_end_row + 1
-            for slot, title in enumerate(deduction_items):
-                deduction_total_row = _write_month_table(
-                    sheet,
-                    deduction_title_row,
-                    DETAIL_START_COLUMNS[slot],
-                    title,
-                    result.purchase_summary,
-                    "item",
-                    title,
-                    months,
-                    title_start_column=DETAIL_START_COLUMNS[slot] + 1,
-                )
-                purchase_end_row = max(purchase_end_row, deduction_total_row)
-
-    sales_title_row = purchase_end_row + 3
-    sales_accounts = [
-        account
-        for account in sorted(
-            result.sales_by_account["account_name"].dropna().astype(str).unique()
+        write_summary_row(
+            fixed_row,
+            "고정",
+            _total_value(result.purchase_summary, "item", "고정", "supply_amount"),
+            _total_value(result.purchase_summary, "item", "고정", "tax_amount"),
         )
-        if _has_values(result.sales_by_account, "account_name", account)
-    ]
-    sales_items: list[tuple[str, pd.DataFrame, str, str, bool]] = [
-        (account, result.sales_by_account, "account_name", account, False)
-        for account in sales_accounts
-    ]
-    if _has_values(result.sales_summary, "item", "면세 매출"):
-        sales_items.append(("면세", result.sales_summary, "item", "면세 매출", True))
+        write_summary_row(
+            split_total_row,
+            "계",
+            f"=F{general_row}+F{fixed_row}",
+            f"=G{general_row}+G{fixed_row}",
+            total=True,
+        )
+        base_supply_ref = f"F{split_total_row}"
+        base_tax_ref = f"G{split_total_row}"
+        summary_row = split_total_row + 1
 
-    last_sales_detail_row = sales_title_row - 1
-    sales_table_totals: list[tuple[str, int, int]] = []
-    for item_index in range(0, len(sales_items), len(DETAIL_START_COLUMNS)):
-        band = item_index // len(DETAIL_START_COLUMNS)
-        title_row = sales_title_row + band * rows_per_band
-        for slot, (title, frame, key_column, key, exempt) in enumerate(
-            sales_items[item_index : item_index + len(DETAIL_START_COLUMNS)]
-        ):
-            start_column = DETAIL_START_COLUMNS[slot]
-            total_row = _write_month_table(
+    other_rows: list[int] = []
+    for label, key in (("카드외", "카드외"), ("의제매입세액", "의제매입세액")):
+        if _has_values(result.purchase_summary, "item", key):
+            write_summary_row(
+                summary_row,
+                label,
+                _total_value(result.purchase_summary, "item", key, "supply_amount"),
+                _total_value(result.purchase_summary, "item", key, "tax_amount"),
+            )
+            other_rows.append(summary_row)
+            summary_row += 1
+
+    overall_row = summary_row
+    write_summary_row(
+        overall_row,
+        "계",
+        f"={base_supply_ref}" + "".join(f"+F{row}" for row in other_rows),
+        f"={base_tax_ref}" + "".join(f"+G{row}" for row in other_rows),
+        total=True,
+    )
+    summary_row += 1
+
+    deduction_rows: list[int] = []
+    for label in ("불공", "공통"):
+        if _has_values(result.purchase_summary, "item", label):
+            write_summary_row(
+                summary_row,
+                label,
+                _total_value(result.purchase_summary, "item", label, "supply_amount"),
+                _total_value(result.purchase_summary, "item", label, "tax_amount"),
+            )
+            deduction_rows.append(summary_row)
+            summary_row += 1
+
+    deduction_total_row = summary_row
+    write_summary_row(
+        deduction_total_row,
+        "차감계",
+        f"=F{overall_row}" + "".join(f"-F{row}" for row in deduction_rows),
+        f"=G{overall_row}" + "".join(f"-G{row}" for row in deduction_rows),
+        total=True,
+    )
+    purchase_end_row = deduction_total_row
+
+    detail_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = []
+    if _has_values(result.purchase_summary, "item", "카드외"):
+        detail_items.extend(
+            [
+                ("카과", result.purchase_summary, "item", "카드외", False, False),
+                ("현과", result.purchase_summary, "item", "현과", False, True),
+            ]
+        )
+    if _has_values(result.purchase_summary, "item", "의제매입세액"):
+        detail_items.append(
+            ("의제매입세액", result.purchase_summary, "item", "의제매입세액", False, False)
+        )
+    for label in ("불공", "공통"):
+        if _has_values(result.purchase_summary, "item", label):
+            detail_items.append((label, result.purchase_summary, "item", label, False, False))
+
+    detail_end_row = purchase_end_row
+    if detail_items:
+        detail_title_row = purchase_end_row + 4
+        for item_index in range(0, len(detail_items), 3):
+            title_row = detail_title_row + (item_index // 3) * rows_per_band
+            detail_end_row = _write_shared_month_band(
                 sheet,
                 title_row,
-                start_column,
-                title,
-                frame,
-                key_column,
-                key,
+                detail_items[item_index : item_index + 3],
                 months,
-                marker="③" if item_index == 0 and slot == 0 else "",
-                exempt=exempt,
+                marker="②" if item_index == 0 else "",
             )
-            sales_table_totals.append((key, total_row, start_column))
-            last_sales_detail_row = max(last_sales_detail_row, total_row)
 
-    taxable_sales_total_ref: str | None = None
-    if len(sales_accounts) > 1 and _has_values(
-        result.sales_summary,
-        "item",
-        "과세매출 총계",
-    ):
-        compact_total_row = _write_compact_month_table(
-            sheet,
-            sales_title_row,
-            9,
-            "계",
-            result.sales_summary,
-            "item",
-            "과세매출 총계",
-            months,
+    sales_accounts = [
+        account
+        for account in sorted(result.sales_by_account["account_name"].dropna().astype(str).unique())
+        if _has_values(result.sales_by_account, "account_name", account)
+    ]
+    taxable_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = [
+        (account, result.sales_by_account, "account_name", account, False, False)
+        for account in sales_accounts
+    ]
+    if not taxable_items and _has_values(result.sales_summary, "item", "과세매출 총계"):
+        taxable_items.append(
+            ("계", result.sales_summary, "item", "과세매출 총계", False, False)
         )
-        taxable_sales_total_ref = f"J{compact_total_row}"
-        last_sales_detail_row = max(last_sales_detail_row, compact_total_row)
-    elif sales_accounts:
-        first_account_total = next(
-            item for item in sales_table_totals if item[0] == sales_accounts[0]
-        )
-        taxable_sales_total_ref = (
-            f"{get_column_letter(first_account_total[2] + 2)}{first_account_total[1]}"
-        )
-    elif _has_values(result.sales_summary, "item", "과세매출 총계"):
-        total_row = _write_month_table(
-            sheet,
-            sales_title_row,
-            1,
-            "계",
-            result.sales_summary,
-            "item",
-            "과세매출 총계",
-            months,
-            marker="③",
-        )
-        taxable_sales_total_ref = f"C{total_row}"
-        last_sales_detail_row = total_row
+    exempt_item = ("면세", result.sales_summary, "item", "면세 매출", False, False)
+    if len(taxable_items) == 1:
+        sales_items = [taxable_items[0], None, exempt_item]
+    else:
+        sales_items = taxable_items[:2] + [exempt_item] + taxable_items[2:]
 
-    row = max(purchase_end_row, last_sales_detail_row)
-    if taxable_sales_total_ref is not None:
-        sales_declaration_row = last_sales_detail_row + 1
+    sales_title_row = detail_end_row + 6
+    sales_end_row = sales_title_row - 1
+    taxable_sales_refs: list[str] = []
+    for item_index in range(0, len(sales_items), 3):
+        title_row = sales_title_row + (item_index // 3) * rows_per_band
+        band_items = sales_items[item_index : item_index + 3]
+        sales_end_row = _write_shared_month_band(
+            sheet,
+            title_row,
+            band_items,
+            months,
+            marker="③" if item_index == 0 else "",
+            first_title_in_month_column=item_index == 0,
+        )
+        for slot, item in enumerate(band_items):
+            if item is not None and (
+                item[2] == "account_name" or item[3] == "과세매출 총계"
+            ):
+                supply_column = SHARED_VALUE_START_COLUMNS[slot] + 1
+                taxable_sales_refs.append(f"{get_column_letter(supply_column)}{sales_end_row}")
+
+    row = max(purchase_end_row, detail_end_row, sales_end_row)
+    if taxable_sales_refs:
+        sales_declaration_row = sales_end_row + 1
         supply_cell = sheet.cell(
             sales_declaration_row,
             3,
-            f"={taxable_sales_total_ref}",
+            "=" + "+".join(taxable_sales_refs),
         )
         tax_cell = sheet.cell(
             sales_declaration_row,
@@ -607,12 +604,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         card_items = [
             (display, key)
             for display, key in (("카드", "카드매출"), ("현영", "현영매출"))
-            if _has_values(
-                result.sales_summary,
-                "item",
-                key,
-                fields=("total_amount",),
-            )
+            if _has_values(result.sales_summary, "item", key, fields=("total_amount",))
         ]
         if card_items:
             card_outside_row = sales_declaration_row + 1
@@ -624,22 +616,13 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             ]
             gross_formula = "+".join(gross_refs)
             label = sheet.cell(card_outside_row, 2, "카드외")
-            supply = sheet.cell(
-                card_outside_row,
-                3,
-                f"=ROUND(({gross_formula})/1.1,0)",
-            )
-            tax = sheet.cell(
-                card_outside_row,
-                4,
-                f"={gross_formula}-C{card_outside_row}",
-            )
+            supply = sheet.cell(card_outside_row, 3, f"=ROUND(({gross_formula})/1.1,0)")
+            tax = sheet.cell(card_outside_row, 4, f"={gross_formula}-C{card_outside_row}")
             for cell in (label, supply, tax):
                 _style_ledger_cell(cell, bold=True)
                 cell.border = Border()
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 cell.number_format = MONEY_FORMAT
-
             row, _ = _write_total_amount_table(
                 sheet,
                 card_table_title_row,
@@ -658,7 +641,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             cell.fill = PatternFill("solid", fgColor=WHITE)
 
     sheet.sheet_view.showGridLines = False
-    widths = (4, 10, 13, 9, 4, 7, 11, 9, 10, 10, 9, 7, 7)
+    widths = (4, 12, 14, 10, 11, 12, 10, 9, 12, 10)
     for column, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.page_setup.orientation = "portrait"
