@@ -26,10 +26,7 @@ SHARED_VALUE_START_COLUMNS = (2, 5, 8)
 SUMMARY_END_COLUMN = 10
 COUNT_FORMAT = '"("0")"'
 MONEY_FORMAT = "#,##0_);[Red](#,##0)"
-MONTH_ROW_HEIGHT = 26
-TOTAL_ROW_HEIGHT = 20
-SUMMARY_ROW_HEIGHT = 22
-SPACER_ROW_HEIGHT = 8
+LEDGER_ROW_HEIGHT = 25
 
 
 def _excel_value(value: object) -> object:
@@ -76,8 +73,6 @@ def _set_summary_heading(sheet, company_name: str, months: list[str]) -> None:
         cell = sheet.cell(1, start_column, text)
         cell.font = Font(name="맑은 고딕", size=size, bold=True, color=LEDGER_INK)
         cell.alignment = Alignment(horizontal=alignment, vertical="center")
-    sheet.row_dimensions[1].height = 25
-    sheet.row_dimensions[2].height = 8
 
 
 def _set_title(sheet, text: str, end_column: int) -> None:
@@ -127,7 +122,10 @@ def _style_ledger_cell(cell, *, bold: bool = False, total: bool = False) -> None
     cell.fill = PatternFill("solid", fgColor=WHITE)
     cell.font = Font(name="맑은 고딕", size=9, bold=bold, color=LEDGER_INK)
     cell.alignment = Alignment(vertical="center")
-    cell.border = Border(bottom=LEDGER_TOTAL_RULE if total else LEDGER_RULE)
+    cell.border = Border(
+        top=LEDGER_TOTAL_RULE if total else None,
+        bottom=LEDGER_RULE,
+    )
 
 
 def _write_month_table(
@@ -253,7 +251,6 @@ def _write_total_amount_table(
     first_data_row = title_row + 1
     for month_index, month in enumerate(months):
         row = first_data_row + month_index
-        sheet.row_dimensions[row].height = MONTH_ROW_HEIGHT
         month_cell = sheet.cell(row, 1, _month_label(month, months))
         _style_ledger_cell(month_cell)
         month_cell.alignment = Alignment(horizontal="center", vertical="bottom")
@@ -264,7 +261,6 @@ def _write_total_amount_table(
             cell.number_format = MONEY_FORMAT
 
     total_row = first_data_row + len(months)
-    sheet.row_dimensions[total_row].height = TOTAL_ROW_HEIGHT
     label = sheet.cell(total_row, 1, "계")
     _style_ledger_cell(label, bold=True, total=True)
     label.alignment = Alignment(horizontal="center", vertical="bottom")
@@ -327,7 +323,6 @@ def _write_shared_month_band(
     first_data_row = title_row + 1
     for month_index, month in enumerate(months):
         row = first_data_row + month_index
-        sheet.row_dimensions[row].height = MONTH_ROW_HEIGHT
         month_cell = sheet.cell(row, 1, _month_label(month, months))
         _style_ledger_cell(month_cell)
         month_cell.alignment = Alignment(horizontal="center", vertical="bottom")
@@ -349,7 +344,6 @@ def _write_shared_month_band(
                 cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
 
     total_row = first_data_row + len(months)
-    sheet.row_dimensions[total_row].height = TOTAL_ROW_HEIGHT
     total_label = sheet.cell(total_row, 1, "계")
     _style_ledger_cell(total_label, bold=True, total=True)
     total_label.alignment = Alignment(horizontal="center", vertical="bottom")
@@ -367,8 +361,6 @@ def _write_shared_month_band(
             _style_ledger_cell(cell, bold=True, total=True)
             cell.alignment = Alignment(horizontal="right", vertical="bottom")
             cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
-    for column in range(1, SUMMARY_END_COLUMN + 1):
-        sheet.cell(total_row, column).border = Border(bottom=LEDGER_TOTAL_RULE)
     return total_row
 
 
@@ -425,7 +417,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         *,
         total: bool = False,
     ) -> None:
-        sheet.row_dimensions[row_number].height = SUMMARY_ROW_HEIGHT
         for column, value in zip((5, 6, 7), (label, supply_value, tax_value)):
             cell = sheet.cell(row_number, column, value)
             _style_ledger_cell(cell, bold=True, total=total)
@@ -531,8 +522,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     detail_end_row = purchase_end_row
     if detail_items:
         detail_title_row = purchase_end_row + 4
-        for row_number in range(purchase_end_row + 1, detail_title_row):
-            sheet.row_dimensions[row_number].height = SPACER_ROW_HEIGHT
         for item_index in range(0, len(detail_items), 3):
             title_row = detail_title_row + (item_index // 3) * rows_per_band
             detail_end_row = _write_shared_month_band(
@@ -572,8 +561,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         sales_items.extend(taxable_items[2:])
 
     sales_title_row = detail_end_row + 6
-    for row_number in range(detail_end_row + 1, sales_title_row):
-        sheet.row_dimensions[row_number].height = SPACER_ROW_HEIGHT
     sales_end_row = sales_title_row - 1
     taxable_sales_refs: list[str] = []
     for item_index in range(0, len(sales_items), 3):
@@ -597,7 +584,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     row = max(purchase_end_row, detail_end_row, sales_end_row)
     if taxable_sales_refs:
         sales_declaration_row = sales_end_row + 1
-        sheet.row_dimensions[sales_declaration_row].height = SUMMARY_ROW_HEIGHT
         supply_cell = sheet.cell(
             sales_declaration_row,
             3,
@@ -622,7 +608,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         ]
         if card_items:
             card_outside_row = sales_declaration_row + 1
-            sheet.row_dimensions[card_outside_row].height = SUMMARY_ROW_HEIGHT
             card_table_title_row = card_outside_row + 5
             card_total_row = card_table_title_row + len(months) + 1
             gross_refs = [
@@ -646,6 +631,9 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
                 months,
             )
 
+    for row_number in range(1, row + 1):
+        sheet.row_dimensions[row_number].height = LEDGER_ROW_HEIGHT
+
     for row_cells in sheet.iter_rows(
         min_row=1,
         max_row=row,
@@ -656,21 +644,17 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             cell.fill = PatternFill("solid", fgColor=WHITE)
 
     for row_number in range(3, row + 1):
-        row_rule = (
-            LEDGER_TOTAL_RULE
-            if any(
-                getattr(
-                    sheet.cell(row_number, column).border.bottom,
-                    "style",
-                    None,
-                )
-                == "medium"
-                for column in range(1, SUMMARY_END_COLUMN + 1)
-            )
-            else LEDGER_RULE
+        has_content = any(
+            sheet.cell(row_number, column).value is not None
+            for column in range(1, SUMMARY_END_COLUMN + 1)
         )
         for column in range(1, SUMMARY_END_COLUMN + 1):
-            sheet.cell(row_number, column).border = Border(bottom=row_rule)
+            cell = sheet.cell(row_number, column)
+            is_total_cell = getattr(cell.border.top, "style", None) == "medium"
+            sheet.cell(row_number, column).border = Border(
+                top=LEDGER_TOTAL_RULE if is_total_cell else None,
+                bottom=LEDGER_RULE if has_content else None,
+            )
 
     sheet.sheet_view.showGridLines = False
     widths = (4, 12, 14, 10, 11, 12, 10, 9, 12, 10)
