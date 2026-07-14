@@ -54,20 +54,21 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     workbook = load_workbook(output, data_only=False)
     assert workbook.sheetnames == ["집계표", "불공검토", "거래상세", "미분류", "검산"]
     summary = workbook["집계표"]
-    assert summary["A1"].value == "테스트상사 부가세 월별 집계표"
-    assert summary["A5"].value == "상품"
-    assert [summary.cell(6, column).value for column in range(1, 6)] == [
-        "월",
-        "매수",
-        "공급가액",
-        "세액",
-        "합계금액",
-    ]
-    assert summary["A7"].value == "4월"
-    assert summary["B7"].value == 1
-    assert summary["B7"].number_format == '"("0")"'
-    assert summary["A8"].value == "계"
-    assert summary["B8"].value == "=SUM(B7:B7)"
+    assert summary["A1"].value == "2026년 1기 확정"
+    assert summary["E1"].value == "테스트상사"
+    assert summary["J1"].value == "부가세 집계표"
+    assert summary["A3"].value == "①  상품"
+    assert summary["E3"].value == "원재료(도급)"
+    assert summary["A4"].value == "4월"
+    assert summary["B4"].value == 1
+    assert summary["C4"].value == 1000
+    assert summary["D4"].value == 100
+    assert summary["B4"].number_format == '"("0")"'
+    assert summary["A5"].value == "계"
+    assert summary["B5"].value == "=SUM(B4:B4)"
+    assert summary["A3"].fill.fill_type == "solid"
+    assert summary["A3"].fill.fgColor.rgb.endswith("FFFFFF")
+    assert summary.print_area == "'집계표'!$A$1:$M$29"
     assert summary.page_setup.orientation == "portrait"
     assert summary.page_setup.paperWidth == "170mm"
     assert summary.page_setup.paperHeight == "240mm"

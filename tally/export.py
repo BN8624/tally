@@ -15,18 +15,14 @@ from .settings import CompanySettings
 
 
 NAVY = "1F4E78"
-BLUE = "D9EAF7"
-LIGHT_BLUE = "EAF3F8"
-ORANGE = "FCE4D6"
 RED = "F4CCCC"
-GREEN = "D9EAD3"
-GRAY = "E7E6E6"
 WHITE = "FFFFFF"
 THIN_GRAY = Side(style="thin", color="B7B7B7")
-MEDIUM_NAVY = Side(style="medium", color=NAVY)
-DOUBLE_NAVY = Side(style="double", color=NAVY)
-BLOCK_START_COLUMNS = (1, 7, 13)
-SUMMARY_END_COLUMN = 17
+LEDGER_INK = "404040"
+LEDGER_RULE = Side(style="thin", color="B7B7B7")
+LEDGER_TOTAL_RULE = Side(style="medium", color="666666")
+BLOCK_START_COLUMNS = (1, 5, 8, 11)
+SUMMARY_END_COLUMN = 13
 
 
 def _excel_value(value: object) -> object:
@@ -39,6 +35,47 @@ def _excel_value(value: object) -> object:
     return value
 
 
+def _period_label(months: list[str]) -> str:
+    if not months:
+        return "집계 기간 없음"
+    years = {month[:4] for month in months}
+    month_numbers = {int(month[5:]) for month in months}
+    if len(years) == 1:
+        year = months[0][:4]
+        periods = (
+            ({1, 2, 3}, "1기 예정"),
+            ({4, 5, 6}, "1기 확정"),
+            ({7, 8, 9}, "2기 예정"),
+            ({10, 11, 12}, "2기 확정"),
+        )
+        for period_months, label in periods:
+            if month_numbers and month_numbers.issubset(period_months):
+                return f"{year}년 {label}"
+    return f"{months[0]} ~ {months[-1]}"
+
+
+def _set_summary_heading(sheet, company_name: str, months: list[str]) -> None:
+    headings = (
+        (1, 4, _period_label(months), "left", 10),
+        (5, 9, company_name, "center", 12),
+        (10, 13, "부가세 집계표", "right", 10),
+    )
+    for start_column, end_column, text, alignment, size in headings:
+        sheet.merge_cells(
+            start_row=1,
+            start_column=start_column,
+            end_row=1,
+            end_column=end_column,
+        )
+        cell = sheet.cell(1, start_column, text)
+        cell.font = Font(name="맑은 고딕", size=size, bold=True, color=LEDGER_INK)
+        cell.alignment = Alignment(horizontal=alignment, vertical="center")
+    for column in range(1, SUMMARY_END_COLUMN + 1):
+        sheet.cell(1, column).border = Border(bottom=LEDGER_TOTAL_RULE)
+    sheet.row_dimensions[1].height = 25
+    sheet.row_dimensions[2].height = 8
+
+
 def _set_title(sheet, text: str, end_column: int) -> None:
     sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=end_column)
     cell = sheet.cell(1, 1, text)
@@ -46,16 +83,6 @@ def _set_title(sheet, text: str, end_column: int) -> None:
     cell.fill = PatternFill("solid", fgColor=NAVY)
     cell.alignment = Alignment(horizontal="center", vertical="center")
     sheet.row_dimensions[1].height = 30
-
-
-def _style_section(sheet, row: int, text: str, end_column: int, color: str = BLUE) -> None:
-    sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=end_column)
-    cell = sheet.cell(row, 1, text)
-    cell.font = Font(name="맑은 고딕", size=12, bold=True, color=NAVY)
-    cell.fill = PatternFill("solid", fgColor=color)
-    cell.alignment = Alignment(horizontal="left", vertical="center")
-    cell.border = Border(bottom=MEDIUM_NAVY)
-    sheet.row_dimensions[row].height = 23
 
 
 def _lookup(frame: pd.DataFrame, key_column: str, key: str, month: str, value: str) -> object:
@@ -72,232 +99,197 @@ def _month_label(month: str, months: list[str]) -> str:
     return f"{int(month[5:])}월"
 
 
-def _write_month_block(
+def _item_fields(mode: str) -> tuple[str | None, str | None, str | None]:
+    if mode == "exempt":
+        return ("count", "supply_amount", None)
+    if mode == "total":
+        return (None, "total_amount", None)
+    return ("count", "supply_amount", "tax_amount")
+
+
+def _write_ledger_grid(
     sheet,
     start_row: int,
-    start_column: int,
-    title: str,
-    frame: pd.DataFrame,
-    key_column: str,
-    key: str,
-    months: list[str],
-    *,
-    title_fill: str,
-    emphasis: bool = False,
-    alert: bool = False,
-) -> int:
-    end_column = start_column + 4
-    fill = RED if alert else (GREEN if emphasis else title_fill)
-    sheet.merge_cells(
-        start_row=start_row,
-        start_column=start_column,
-        end_row=start_row,
-        end_column=end_column,
-    )
-    title_cell = sheet.cell(start_row, start_column, title)
-    title_cell.fill = PatternFill("solid", fgColor=fill)
-    title_cell.font = Font(name="맑은 고딕", size=11, bold=True, color=NAVY)
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-    title_cell.border = Border(bottom=MEDIUM_NAVY)
-
-    header_row = start_row + 1
-    for offset, label in enumerate(("월", "매수", "공급가액", "세액", "합계금액")):
-        cell = sheet.cell(header_row, start_column + offset, label)
-        cell.fill = PatternFill("solid", fgColor=GRAY)
-        cell.font = Font(name="맑은 고딕", size=9, bold=True, color=NAVY)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = Border(bottom=THIN_GRAY)
-
-    first_data_row = header_row + 1
-    for month_index, month in enumerate(months):
-        row = first_data_row + month_index
-        sheet.cell(row, start_column, _month_label(month, months))
-        for offset, value_name in enumerate(
-            ("count", "supply_amount", "tax_amount", "total_amount"),
-            start=1,
-        ):
-            sheet.cell(
-                row,
-                start_column + offset,
-                _lookup(frame, key_column, key, month, value_name),
-            )
-        for cell in sheet[row][start_column - 1 : end_column]:
-            cell.border = Border(bottom=THIN_GRAY)
-            cell.alignment = Alignment(
-                horizontal="right" if cell.column > start_column else "center",
-                vertical="center",
-            )
-        sheet.cell(row, start_column + 1).number_format = '"("0")"'
-        for column in range(start_column + 2, end_column + 1):
-            sheet.cell(row, column).number_format = "#,##0;[Red]-#,##0"
-
-    total_row = first_data_row + len(months)
-    sheet.cell(total_row, start_column, "계")
-    for column in range(start_column + 1, end_column + 1):
-        letter = get_column_letter(column)
-        if months:
-            sheet.cell(total_row, column, f"=SUM({letter}{first_data_row}:{letter}{total_row - 1})")
-        else:
-            sheet.cell(total_row, column, 0)
-    for cell in sheet[total_row][start_column - 1 : end_column]:
-        cell.fill = PatternFill("solid", fgColor=LIGHT_BLUE if not alert else RED)
-        cell.font = Font(name="맑은 고딕", bold=True)
-        cell.border = Border(top=MEDIUM_NAVY, bottom=DOUBLE_NAVY)
-        cell.alignment = Alignment(
-            horizontal="right" if cell.column > start_column else "center",
-            vertical="center",
-        )
-    sheet.cell(total_row, start_column + 1).number_format = '"("0")"'
-    for column in range(start_column + 2, end_column + 1):
-        sheet.cell(total_row, column).number_format = "#,##0;[Red]-#,##0"
-    return total_row
-
-
-def _write_block_grid(
-    sheet,
-    start_row: int,
-    items: list[str],
+    marker: str,
+    items: list[tuple[str, str, str]],
     frame: pd.DataFrame,
     key_column: str,
     months: list[str],
-    *,
-    title_fill: str,
-    emphasis: set[str] | None = None,
-    alerts: set[str] | None = None,
 ) -> int:
     if not items:
         return start_row
-    emphasis = emphasis or set()
-    alerts = alerts or set()
-    block_height = len(months) + 3
-    for index, item in enumerate(items):
-        band = index // len(BLOCK_START_COLUMNS)
-        slot = index % len(BLOCK_START_COLUMNS)
-        block_row = start_row + band * (block_height + 1)
-        _write_month_block(
-            sheet,
-            block_row,
-            BLOCK_START_COLUMNS[slot],
-            item,
-            frame,
-            key_column,
-            item,
-            months,
-            title_fill=title_fill,
-            emphasis=item in emphasis,
-            alert=item in alerts,
-        )
+
+    rows_per_band = len(months) + 3
+    for band_start in range(0, len(items), len(BLOCK_START_COLUMNS)):
+        band = band_start // len(BLOCK_START_COLUMNS)
+        title_row = start_row + band * rows_per_band
+        first_data_row = title_row + 1
+        total_row = first_data_row + len(months)
+        band_items = items[band_start : band_start + len(BLOCK_START_COLUMNS)]
+
+        for row in range(title_row, total_row + 1):
+            for column in range(1, SUMMARY_END_COLUMN + 1):
+                cell = sheet.cell(row, column)
+                cell.font = Font(name="맑은 고딕", size=9, color=LEDGER_INK)
+                cell.border = Border(bottom=LEDGER_RULE)
+                cell.alignment = Alignment(vertical="center")
+            sheet.row_dimensions[row].height = 19
+
+        for month_index, month in enumerate(months):
+            month_cell = sheet.cell(first_data_row + month_index, 1, _month_label(month, months))
+            month_cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet.cell(total_row, 1, "계")
+        sheet.cell(total_row, 1).alignment = Alignment(horizontal="center", vertical="center")
+
+        for slot, (display, key, mode) in enumerate(band_items):
+            start_column = BLOCK_START_COLUMNS[slot]
+            end_column = start_column + (3 if slot == 0 else 2)
+            value_start_column = start_column + 1 if slot == 0 else start_column
+            sheet.merge_cells(
+                start_row=title_row,
+                start_column=start_column,
+                end_row=title_row,
+                end_column=end_column,
+            )
+            title = f"{marker}  {display}" if band_start == 0 and slot == 0 else display
+            title_cell = sheet.cell(title_row, start_column, title)
+            title_cell.font = Font(name="맑은 고딕", size=10, bold=True, color=LEDGER_INK)
+            title_cell.alignment = Alignment(horizontal="center", vertical="center")
+            title_cell.border = Border(bottom=LEDGER_TOTAL_RULE)
+
+            fields = _item_fields(mode)
+            for month_index, month in enumerate(months):
+                row = first_data_row + month_index
+                for offset, field in enumerate(fields):
+                    column = value_start_column + offset
+                    if field is not None:
+                        sheet.cell(row, column, _lookup(frame, key_column, key, month, field))
+                    cell = sheet.cell(row, column)
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    cell.number_format = '"("0")"' if field == "count" else "#,##0;[Red]-#,##0"
+
+            for offset, field in enumerate(fields):
+                column = value_start_column + offset
+                cell = sheet.cell(total_row, column)
+                if field is not None:
+                    letter = get_column_letter(column)
+                    cell.value = (
+                        f"=SUM({letter}{first_data_row}:{letter}{total_row - 1})" if months else 0
+                    )
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                cell.number_format = '"("0")"' if field == "count" else "#,##0;[Red]-#,##0"
+
+        for column in range(1, SUMMARY_END_COLUMN + 1):
+            cell = sheet.cell(total_row, column)
+            cell.font = Font(name="맑은 고딕", size=9, bold=True, color=LEDGER_INK)
+            cell.border = Border(top=LEDGER_TOTAL_RULE, bottom=LEDGER_TOTAL_RULE)
+
     band_count = (len(items) + len(BLOCK_START_COLUMNS) - 1) // len(BLOCK_START_COLUMNS)
-    return start_row + band_count * (block_height + 1) - 1
+    return start_row + (band_count - 1) * rows_per_band + len(months) + 1
 
 
-def _ordered_categories(settings: CompanySettings, frame: pd.DataFrame) -> list[str]:
-    preferred = [settings.account_146_label, "원재료(도급)", "제조경비", "도급경비", "기타", "고정"]
-    present = set(frame["account_category"].dropna().astype(str))
-    return [category for category in preferred if category in present or category == settings.account_146_label]
+def _ordered_categories(settings: CompanySettings) -> list[str]:
+    return [settings.account_146_label, "원재료(도급)", "제조경비", "도급경비", "기타", "고정"]
 
 
 def _build_summary(workbook: Workbook, result: ProcessingResult, settings: CompanySettings) -> None:
     sheet = workbook.active
     sheet.title = "집계표"
     months = sorted(result.transactions["month"].dropna().astype(str).unique())
-    _set_title(sheet, f"{settings.name} 부가세 월별 집계표", SUMMARY_END_COLUMN)
-    period = " ~ ".join((months[0], months[-1])) if months else "거래 없음"
-    sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=SUMMARY_END_COLUMN)
-    sheet.cell(2, 1, f"신고 기간 {period} · 검산 {'완료' if result.validation_passed else '실패'}")
-    sheet.cell(2, 1).alignment = Alignment(horizontal="center")
-    sheet.cell(2, 1).font = Font(name="맑은 고딕", bold=True, color="38761D" if result.validation_passed else "9C0006")
+    _set_summary_heading(sheet, settings.name, months)
 
-    row = 4
-    _style_section(sheet, row, "① 매입 계정 분류별 월별 집계", SUMMARY_END_COLUMN)
-    row += 1
-    row = _write_block_grid(
+    row = 3
+    category_items = [
+        (category, category, "tax") for category in _ordered_categories(settings)
+    ]
+    row = _write_ledger_grid(
         sheet,
         row,
-        _ordered_categories(settings, result.purchase_by_category),
+        "①",
+        category_items,
         result.purchase_by_category,
         "account_category",
         months,
-        title_fill=BLUE,
     )
 
-    row += 1
-    _style_section(sheet, row, "② 매입 요약 · 불공 차감", SUMMARY_END_COLUMN)
-    row += 1
+    row += 2
     purchase_items = [
-        "일반매입",
-        "고정",
-        "세금계산서 매입계",
-        "카과",
-        "현과",
-        "카드매입",
-        "과세 매입 총계",
-        "불공",
-        "과매계",
-        "면세 매입",
+        ("일반", "일반매입", "tax"),
+        ("고정", "고정", "tax"),
+        ("계", "세금계산서 매입계", "tax"),
+        ("카과", "카과", "tax"),
+        ("현과", "현과", "tax"),
+        ("카드계", "카드매입", "tax"),
+        ("과세계", "과세 매입 총계", "tax"),
+        ("불공", "불공", "tax"),
+        ("과매계", "과매계", "tax"),
+        ("면세", "면세 매입", "exempt"),
     ]
-    row = _write_block_grid(
+    row = _write_ledger_grid(
         sheet,
         row,
+        "②",
         purchase_items,
         result.purchase_summary,
         "item",
         months,
-        title_fill=BLUE,
-        emphasis={"세금계산서 매입계", "카드매입", "과세 매입 총계", "과매계"},
-        alerts={"불공"},
     )
 
-    row += 1
-    _style_section(sheet, row, "③ 매출 계정별 월별 집계", SUMMARY_END_COLUMN, color=ORANGE)
-    row += 1
+    row += 2
     accounts = sorted(result.sales_by_account["account_name"].dropna().astype(str).unique())
-    row = _write_block_grid(
+    account_items = [(account, account, "tax") for account in accounts]
+    row = _write_ledger_grid(
         sheet,
         row,
-        accounts,
+        "③",
+        account_items,
         result.sales_by_account,
         "account_name",
         months,
-        title_fill=ORANGE,
     )
 
-    row += 1
-    _style_section(sheet, row, "④ 매출 요약 · 카드·현영 보조 집계", SUMMARY_END_COLUMN, color=ORANGE)
-    row += 1
-    row = _write_block_grid(
+    row += 2
+    row = _write_ledger_grid(
         sheet,
         row,
-        ["과세매출 총계", "면세 매출", "카드매출", "현영매출"],
+        "④",
+        [
+            ("과세계", "과세매출 총계", "tax"),
+            ("면세", "면세 매출", "exempt"),
+            ("카드", "카드매출", "total"),
+            ("현영", "현영매출", "total"),
+        ],
         result.sales_summary,
         "item",
         months,
-        title_fill=ORANGE,
-        emphasis={"과세매출 총계"},
     )
 
-    sheet.freeze_panes = "A5"
+    for row_cells in sheet.iter_rows(
+        min_row=1,
+        max_row=row,
+        min_col=1,
+        max_col=SUMMARY_END_COLUMN,
+    ):
+        for cell in row_cells:
+            cell.fill = PatternFill("solid", fgColor=WHITE)
+
     sheet.sheet_view.showGridLines = False
-    for start_column in BLOCK_START_COLUMNS:
-        widths = (10, 9, 16, 14, 17)
-        for offset, width in enumerate(widths):
-            sheet.column_dimensions[get_column_letter(start_column + offset)].width = width
-    for gap_column in (6, 12):
-        sheet.column_dimensions[get_column_letter(gap_column)].width = 3
+    widths = (7, 7, 14, 12, 7, 14, 12, 7, 14, 12, 7, 14, 12)
+    for column, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.page_setup.orientation = "portrait"
     sheet.page_setup.paperWidth = "170mm"
     sheet.page_setup.paperHeight = "240mm"
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 1
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.page_margins.left = 0.2
-    sheet.page_margins.right = 0.2
-    sheet.page_margins.top = 0.25
-    sheet.page_margins.bottom = 0.25
-    sheet.page_margins.header = 0.1
-    sheet.page_margins.footer = 0.1
+    sheet.page_margins.left = 0.15
+    sheet.page_margins.right = 0.15
+    sheet.page_margins.top = 0.2
+    sheet.page_margins.bottom = 0.2
+    sheet.page_margins.header = 0
+    sheet.page_margins.footer = 0
     sheet.print_options.horizontalCentered = True
-    sheet.print_title_rows = "1:2"
     sheet.print_area = f"A1:{get_column_letter(SUMMARY_END_COLUMN)}{row}"
 
 
