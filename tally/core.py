@@ -38,6 +38,8 @@ def classify_purchase_account(code: str, settings: CompanySettings) -> str:
         return settings.account_overrides[code]
     if code in settings.fixed_asset_codes:
         return "고정"
+    if len(code) == 3 and code.isdigit() and code.startswith("2"):
+        return "고정"
     if code == "146":
         return settings.account_146_label
     if code == "156":

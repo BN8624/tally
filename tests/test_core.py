@@ -50,6 +50,7 @@ def test_account_classification_uses_only_canon_rules_and_company_priority() -> 
     assert classify_purchase_account("146", settings) == "음식재료"
     assert classify_purchase_account("156", settings) == "원재료(도급)"
     assert classify_purchase_account("210", settings) == "고정"
+    assert classify_purchase_account("212", settings) == "고정"
     assert classify_purchase_account("512", settings) == "제조경비"
     assert classify_purchase_account("612", settings) == "도급경비"
     assert classify_purchase_account("813", settings) == "기타"

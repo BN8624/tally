@@ -93,12 +93,12 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["A5"].value == "계"
     assert summary["B5"].value == "=SUM(B4:B4)"
     assert summary["I6"].value == "계"
-    assert summary["J6"].value == 1500
-    assert summary["K6"].value == 150
+    assert summary["J6"].value == "=J5"
+    assert summary["K6"].value == "=K5"
     assert summary["I7"].value == "불공"
     assert summary["J7"].value == 500
     assert summary["I8"].value == "차감계"
-    assert summary["J8"].value == 1000
+    assert summary["J8"].value == "=J6-J7"
     assert summary["B9"].value == "불공"
     assert summary["B10"].value == 1
     assert summary["A14"].value == "③  상품매출"
@@ -181,13 +181,75 @@ def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> 
     assert summary["I7"].value == "그 밖의 공제매입세액"
     assert summary["J9"].value == "=SUM(J8:J8)"
     assert summary["I10"].value == "계"
-    assert summary["J10"].value == 2100
+    assert summary["J10"].value == "=J5+J9"
     assert summary["I11"].value == "불공"
     assert summary["J11"].value == 200
     assert summary["I12"].value == "공통"
     assert summary["J12"].value == 150
     assert summary["I13"].value == "차감계"
-    assert summary["J13"].value == 1750
+    assert summary["J13"].value == "=J10-J11-J12"
     assert summary["B14"].value == "불공"
     assert summary["F14"].value == "공통"
     assert summary["A19"].value == "③  상품매출"
+
+
+def test_export_splits_fixed_assets_after_rounding_adjustment(tmp_path) -> None:
+    rows = [
+        {
+            "row_id": "Sheet1:2",
+            "sheet": "Sheet1",
+            "source_row": 2,
+            "division": "매입",
+            "date": date(2026, 4, 1),
+            "month": "2026-04",
+            "vendor": "일반거래처",
+            "item": "일반",
+            "supply_amount": Decimal(1005),
+            "tax_amount": Decimal(100),
+            "total_amount": Decimal(1105),
+            "original_type": "과세",
+            "account_code": "146",
+            "account_name": "상품",
+            "card_company": "",
+            "card_number": "",
+        },
+        {
+            "row_id": "Sheet1:3",
+            "sheet": "Sheet1",
+            "source_row": 3,
+            "division": "매입",
+            "date": date(2026, 4, 2),
+            "month": "2026-04",
+            "vendor": "고정거래처",
+            "item": "비품",
+            "supply_amount": Decimal(1005),
+            "tax_amount": Decimal(100),
+            "total_amount": Decimal(1105),
+            "original_type": "과세",
+            "account_code": "212",
+            "account_name": "비품",
+            "card_company": "",
+            "card_number": "",
+        },
+    ]
+    settings = CompanySettings(name="고정테스트")
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "fixed-layout.xlsx")
+
+    summary = load_workbook(output, data_only=False)["집계표"]
+    assert summary["E3"].value == "고정"
+    assert summary["I6"].value == "단수차이 조정"
+    assert summary["J6"].value == "=J5"
+    assert summary["K6"].value == "=ROUNDDOWN(J5*0.1,0)"
+    assert summary["I7"].value == "일반"
+    assert summary["J7"].value == 1005
+    assert summary["K7"].value == "=K6-K8"
+    assert summary["I8"].value == "고정"
+    assert summary["J8"].value == 1005
+    assert summary["K8"].value == 100
+    assert summary["I9"].value == "계"
+    assert summary["J9"].value == "=J7+J8"
+    assert summary["K9"].value == "=K7+K8"
+    assert summary["I10"].value == "계"
+    assert summary["J10"].value == "=J9"
+    assert summary["K10"].value == "=K9"

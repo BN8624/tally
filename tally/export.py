@@ -340,11 +340,56 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         )
 
     purchase_end_row = max(last_purchase_detail_row, purchase_total_row or 2)
+    invoice_total_row = purchase_total_row
+    if purchase_total_row is not None and _has_values(result.purchase_summary, "item", "고정"):
+        adjustment_row = purchase_total_row + 1
+        general_row = adjustment_row + 1
+        fixed_row = general_row + 1
+        invoice_total_row = fixed_row + 1
+        split_rows = (
+            (
+                adjustment_row,
+                "단수차이 조정",
+                f"=J{purchase_total_row}",
+                f"=ROUNDDOWN(J{purchase_total_row}*0.1,0)",
+            ),
+            (
+                general_row,
+                "일반",
+                _total_value(result.purchase_summary, "item", "일반매입", "supply_amount"),
+                f"=K{adjustment_row}-K{fixed_row}",
+            ),
+            (
+                fixed_row,
+                "고정",
+                _total_value(result.purchase_summary, "item", "고정", "supply_amount"),
+                _total_value(result.purchase_summary, "item", "고정", "tax_amount"),
+            ),
+            (
+                invoice_total_row,
+                "계",
+                f"=J{general_row}+J{fixed_row}",
+                f"=K{general_row}+K{fixed_row}",
+            ),
+        )
+        for row, title, supply_value, tax_value in split_rows:
+            for column, value in zip(
+                range(purchase_summary_column, purchase_summary_column + 3),
+                (title, supply_value, tax_value),
+            ):
+                cell = sheet.cell(row, column, value)
+                _style_ledger_cell(cell, bold=True, total=title == "계")
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                if column > purchase_summary_column:
+                    cell.number_format = MONEY_FORMAT
+        purchase_end_row = max(purchase_end_row, invoice_total_row)
+
     other_items = [
         (title, key)
         for title, key in (("카드외", "카드외"), ("의제매입세액", "의제매입세액"))
         if _has_values(result.purchase_summary, "item", key)
     ]
+    other_total_row: int | None = None
     if other_items:
         other_title_row = purchase_end_row + 2
         other_detail_end_row = other_title_row - 1
@@ -376,27 +421,68 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         purchase_end_row = max(other_detail_end_row, other_total_row)
 
     if _has_values(result.purchase_summary, "item", "매입세액 합계"):
-        summary_items = [("계", "매입세액 합계")]
+        summary_start_row = purchase_end_row + 1
+        overall_row = summary_start_row
+        total_references = [
+            row
+            for row in (invoice_total_row, other_total_row)
+            if row is not None
+        ]
+        overall_values = ["계"]
+        for column in (10, 11):
+            letter = get_column_letter(column)
+            overall_values.append(
+                "=" + "+".join(f"{letter}{row}" for row in total_references)
+            )
+        for column, value in zip(
+            range(purchase_summary_column, purchase_summary_column + 3),
+            overall_values,
+        ):
+            cell = sheet.cell(overall_row, column, value)
+            _style_ledger_cell(cell, bold=True, total=True)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            if column > purchase_summary_column:
+                cell.number_format = MONEY_FORMAT
+
+        deduction_rows: list[int] = []
+        row = overall_row + 1
         for title in ("불공", "공통"):
             if _has_values(result.purchase_summary, "item", title):
-                summary_items.append((title, title))
-        summary_items.append(("차감계", "차감계"))
+                deduction_rows.append(row)
+                values = (
+                    title,
+                    _total_value(result.purchase_summary, "item", title, "supply_amount"),
+                    _total_value(result.purchase_summary, "item", title, "tax_amount"),
+                )
+                for column, value in zip(
+                    range(purchase_summary_column, purchase_summary_column + 3),
+                    values,
+                ):
+                    cell = sheet.cell(row, column, value)
+                    _style_ledger_cell(cell, bold=True)
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    if column > purchase_summary_column:
+                        cell.number_format = MONEY_FORMAT
+                row += 1
 
-        summary_start_row = purchase_end_row + 1
-        for offset, (title, key) in enumerate(summary_items):
-            row = summary_start_row + offset
-            values = (
-                title,
-                _total_value(result.purchase_summary, "item", key, "supply_amount"),
-                _total_value(result.purchase_summary, "item", key, "tax_amount"),
+        deduction_total_row = row
+        deduction_values = ["차감계"]
+        for column in (10, 11):
+            letter = get_column_letter(column)
+            deduction_values.append(
+                f"={letter}{overall_row}"
+                + "".join(f"-{letter}{deduction_row}" for deduction_row in deduction_rows)
             )
-            for column, value in zip(range(purchase_summary_column, purchase_summary_column + 3), values):
-                cell = sheet.cell(row, column, value)
-                _style_ledger_cell(cell, bold=True, total=title in {"계", "차감계"})
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-                if column > purchase_summary_column:
-                    cell.number_format = MONEY_FORMAT
-        purchase_end_row = summary_start_row + len(summary_items) - 1
+        for column, value in zip(
+            range(purchase_summary_column, purchase_summary_column + 3),
+            deduction_values,
+        ):
+            cell = sheet.cell(row, column, value)
+            _style_ledger_cell(cell, bold=True, total=True)
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            if column > purchase_summary_column:
+                cell.number_format = MONEY_FORMAT
+        purchase_end_row = deduction_total_row
 
         deduction_items = [
             title
@@ -572,7 +658,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             cell.fill = PatternFill("solid", fgColor=WHITE)
 
     sheet.sheet_view.showGridLines = False
-    widths = (4, 10, 13, 9, 4, 7, 11, 9, 6, 10, 9, 7, 7)
+    widths = (4, 10, 13, 9, 4, 7, 11, 9, 10, 10, 9, 7, 7)
     for column, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.page_setup.orientation = "portrait"
