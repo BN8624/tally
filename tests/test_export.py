@@ -111,7 +111,7 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["B31"].value == "=SUM(B30:B30)"
     assert not any(
         cell.value
-        in {"원재료(도급)", "제조경비", "도급경비", "고정"}
+        in {"원재료(도급)", "제조경비", "도급경비", "고정", "현과", "면세"}
         for row in summary.iter_rows()
         for cell in row
     )
@@ -192,6 +192,12 @@ def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> 
     assert summary["B15"].value == "카과"
     assert summary["E15"].value == "현과"
     assert summary["H15"].value == "의제매입세액"
+    assert summary["B16"].value == 1
+    assert summary["C16"].value == 300
+    assert summary["D16"].value == 30
+    assert summary["E16"].value == 1
+    assert summary["F16"].value == 400
+    assert summary["G16"].value == 40
     assert summary["B19"].value == "불공"
     assert summary["E19"].value == "공통"
     assert summary["A27"].value == "③  상품매출"

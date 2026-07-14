@@ -513,13 +513,11 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     purchase_end_row = deduction_total_row
 
     detail_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = []
-    if _has_values(result.purchase_summary, "item", "카드외"):
-        detail_items.extend(
-            [
-                ("카과", result.purchase_summary, "item", "카드외", False, False),
-                ("현과", result.purchase_summary, "item", "현과", False, True),
-            ]
-        )
+    for label in ("카과", "현과"):
+        if _has_values(result.purchase_summary, "item", label):
+            detail_items.append(
+                (label, result.purchase_summary, "item", label, False, False)
+            )
     if _has_values(result.purchase_summary, "item", "의제매입세액"):
         detail_items.append(
             ("의제매입세액", result.purchase_summary, "item", "의제매입세액", False, False)
@@ -554,11 +552,20 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         taxable_items.append(
             ("계", result.sales_summary, "item", "과세매출 총계", False, False)
         )
-    exempt_item = ("면세", result.sales_summary, "item", "면세 매출", False, False)
+    exempt_item = (
+        ("면세", result.sales_summary, "item", "면세 매출", False, False)
+        if _has_values(result.sales_summary, "item", "면세 매출")
+        else None
+    )
     if len(taxable_items) == 1:
-        sales_items = [taxable_items[0], None, exempt_item]
+        sales_items = [taxable_items[0]]
+        if exempt_item is not None:
+            sales_items.extend([None, exempt_item])
     else:
-        sales_items = taxable_items[:2] + [exempt_item] + taxable_items[2:]
+        sales_items = taxable_items[:2]
+        if exempt_item is not None:
+            sales_items.append(exempt_item)
+        sales_items.extend(taxable_items[2:])
 
     sales_title_row = detail_end_row + 6
     sales_end_row = sales_title_row - 1
