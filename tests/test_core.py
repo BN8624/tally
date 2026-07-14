@@ -84,6 +84,7 @@ def test_processing_keeps_nondeductible_in_tax_aggregate_then_subtracts_it() -> 
     assert sales.loc["과세매출 총계", "supply_amount"] == Decimal(1200)
     assert sales.loc["카드매출", "total_amount"] == Decimal(770)
     assert sales.loc["현영매출", "total_amount"] == Decimal(-110)
+    assert not result.transactions.loc[result.transactions["division"].eq("매출"), "review_status"].any()
     assert result.validation_passed
 
 
@@ -112,4 +113,3 @@ def test_candidate_decision_can_be_applied_and_negative_transaction_counts_as_on
     assert result.purchase_summary.set_index("item").loc["불공", "count"] == 1
     assert result.purchase_summary.set_index("item").loc["불공", "supply_amount"] == Decimal(-100)
     assert result.validation_passed
-

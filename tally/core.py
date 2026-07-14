@@ -164,9 +164,12 @@ def process_transactions(
         if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
             category = classify_purchase_account(row["account_code"], settings)
         candidate = find_nondeductible_candidate(row, settings)
-        status, final_type, reason, memo = _decision_values(
-            row["original_type"], candidate, decisions.get(row["row_id"], {})
-        )
+        if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
+            status, final_type, reason, memo = _decision_values(
+                row["original_type"], candidate, decisions.get(row["row_id"], {})
+            )
+        else:
+            status, final_type, reason, memo = "", row["original_type"], "", ""
         categories.append(category)
         candidates.append(candidate)
         review_statuses.append(status)
@@ -282,4 +285,3 @@ def process_transactions(
         validation=validation,
         validation_passed=bool(validation["status"].eq("통과").all()),
     )
-
