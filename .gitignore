@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+.venv/
+build/
+dist/
+data/
+outputs/
+*.egg-info/
+*.xlsx
+!tests/fixtures/*.xlsx
+
