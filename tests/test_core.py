@@ -97,7 +97,13 @@ def test_candidate_is_not_auto_confirmed_and_unclassified_fails_closed() -> None
     result = process_transactions(data, CompanySettings(name="업체"))
     assert result.review.iloc[0]["review_status"] == "판단 보류"
     failures = set(result.validation.loc[result.validation["status"].eq("실패"), "check"])
-    assert failures == {"과세·불공 계정분류 공급가액", "미분류 건수", "불공 판단 보류 건수"}
+    assert failures == {
+        "과세·불공 계정분류 건수",
+        "과세·불공 계정분류 공급가액",
+        "과세·불공 계정분류 세액",
+        "미분류 건수",
+        "불공 판단 보류 건수",
+    }
 
 
 def test_candidate_decision_can_be_applied_and_negative_transaction_counts_as_one() -> None:

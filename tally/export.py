@@ -4,14 +4,13 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from .core import CATEGORY_ORDER, ProcessingResult
+from .core import ProcessingResult
 from .settings import CompanySettings
 
 
@@ -349,4 +348,3 @@ def export_workbook(
     )
     workbook.save(path)
     return path
-
