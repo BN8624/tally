@@ -32,8 +32,26 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
             "row_id": "Sheet1:3",
             "sheet": "Sheet1",
             "source_row": 3,
-            "division": "매출",
+            "division": "매입",
             "date": date(2026, 4, 2),
+            "month": "2026-04",
+            "vendor": "상사",
+            "item": "접대",
+            "supply_amount": Decimal(500),
+            "tax_amount": Decimal(50),
+            "total_amount": Decimal(550),
+            "original_type": "불공",
+            "account_code": "813",
+            "account_name": "접대비",
+            "card_company": "",
+            "card_number": "",
+        },
+        {
+            "row_id": "Sheet1:4",
+            "sheet": "Sheet1",
+            "source_row": 4,
+            "division": "매출",
+            "date": date(2026, 4, 3),
             "month": "2026-04",
             "vendor": "고객",
             "item": "매출",
@@ -58,17 +76,47 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["E1"].value == "테스트상사"
     assert summary["J1"].value == "부가세 집계표"
     assert summary["A3"].value == "①  상품"
-    assert summary["E3"].value == "원재료(도급)"
+    assert summary["E3"].value == "기타"
+    assert summary["I3"].value == "계"
     assert summary["A4"].value == "4월"
     assert summary["B4"].value == 1
     assert summary["C4"].value == 1000
     assert summary["D4"].value == 100
+    assert summary["E4"].value == "4월"
+    assert summary["F4"].value == 1
+    assert summary["G4"].value == 500
+    assert summary["H4"].value == 50
+    assert summary["I4"].value == 2
+    assert summary["J4"].value == 1500
+    assert summary["K4"].value == 150
     assert summary["B4"].number_format == '"("0")"'
     assert summary["A5"].value == "계"
     assert summary["B5"].value == "=SUM(B4:B4)"
+    assert summary["J6"].value == "=J5"
+    assert summary["K6"].value == "=ROUNDDOWN(J5*0.1,0)"
+    assert summary["I7"].value == "불공"
+    assert summary["J7"].value == 500
+    assert summary["I8"].value == "차감계"
+    assert summary["J8"].value == "=J6-J7"
+    assert summary["B9"].value == "불공"
+    assert summary["B10"].value == 1
+    assert summary["A14"].value == "③  상품매출"
+    assert summary["C17"].value == "=C16"
+    assert summary["D17"].value == "=ROUNDDOWN(C17*0.1,0)"
+    assert summary["B18"].value == "카드외"
+    assert summary["C18"].value == "=ROUND((B25)/1.1,0)"
+    assert summary["B23"].value == "카드"
+    assert summary["B24"].value == 2200
+    assert summary["B25"].value == "=SUM(B24:B24)"
+    assert not any(
+        cell.value
+        in {"원재료(도급)", "제조경비", "도급경비", "고정", "면세"}
+        for row in summary.iter_rows()
+        for cell in row
+    )
     assert summary["A3"].fill.fill_type == "solid"
     assert summary["A3"].fill.fgColor.rgb.endswith("FFFFFF")
-    assert summary.print_area == "'집계표'!$A$1:$M$29"
+    assert summary.print_area == "'집계표'!$A$1:$M$25"
     assert summary.page_setup.orientation == "portrait"
     assert summary.page_setup.paperWidth == "170mm"
     assert summary.page_setup.paperHeight == "240mm"
@@ -79,5 +127,5 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
         for row in summary.iter_rows()
         for cell in row
     )
-    assert workbook["거래상세"].max_row == 5
+    assert workbook["거래상세"].max_row == 6
     assert workbook["검산"]["A1"].value.startswith("검산 결과")
