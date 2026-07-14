@@ -90,11 +90,19 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["I4"].value == 1500
     assert summary["J4"].value == 150
     assert summary["B4"].number_format == '"("0")"'
+    assert summary.row_dimensions[4].height == 26
+    assert summary["B4"].alignment.vertical == "bottom"
+    assert summary["B4"].border.bottom.style == "dotted"
     assert summary["A5"].value == "계"
     assert summary["B5"].value == "=SUM(B4:B4)"
+    assert summary.row_dimensions[5].height == 20
+    assert summary["J5"].border.bottom.style == "medium"
+    assert getattr(summary["J5"].border.top, "style", None) is None
     assert summary["E6"].value == "계"
     assert summary["F6"].value == "=I5"
     assert summary["G6"].value == "=J5"
+    assert summary.row_dimensions[6].height == 22
+    assert summary["F6"].alignment.vertical == "bottom"
     assert summary["E7"].value == "불공"
     assert summary["F7"].value == 500
     assert summary["E8"].value == "차감계"
@@ -104,6 +112,8 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["A20"].value == "③  상품매출"
     assert summary["C23"].value == "=C22"
     assert summary["D23"].value == "=ROUNDDOWN(C23*0.1,0)"
+    assert summary.row_dimensions[23].height == 22
+    assert summary["C23"].alignment.vertical == "bottom"
     assert summary["B24"].value == "카드외"
     assert summary["C24"].value == "=ROUND((B31)/1.1,0)"
     assert summary["B29"].value == "카드"
@@ -117,6 +127,7 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     )
     assert summary["A3"].fill.fill_type == "solid"
     assert summary["A3"].fill.fgColor.rgb.endswith("FFFFFF")
+    assert summary["A3"].border.bottom.style == "dotted"
     assert summary.print_area == "'집계표'!$A$1:$J$31"
     assert summary.page_setup.orientation == "portrait"
     assert summary.page_setup.paperWidth == "170mm"
@@ -192,6 +203,8 @@ def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> 
     assert summary["B15"].value == "카과"
     assert summary["E15"].value == "현과"
     assert summary["H15"].value == "의제매입세액"
+    assert summary.row_dimensions[12].height == 8
+    assert summary.row_dimensions[14].height == 8
     assert summary["B16"].value == 1
     assert summary["C16"].value == 300
     assert summary["D16"].value == 30
