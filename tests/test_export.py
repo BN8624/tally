@@ -77,7 +77,7 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["J1"].value == "부가세 집계표"
     assert summary["A3"].value == "①  상품"
     assert summary["E3"].value == "기타"
-    assert summary["I3"].value == "계"
+    assert summary["I3"].value == "세금계산서 매입계"
     assert summary["A4"].value == "4월"
     assert summary["B4"].value == 1
     assert summary["C4"].value == 1000
@@ -92,12 +92,13 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["B4"].number_format == '"("0")"'
     assert summary["A5"].value == "계"
     assert summary["B5"].value == "=SUM(B4:B4)"
-    assert summary["J6"].value == "=J5"
-    assert summary["K6"].value == "=ROUNDDOWN(J5*0.1,0)"
+    assert summary["I6"].value == "계"
+    assert summary["J6"].value == 1500
+    assert summary["K6"].value == 150
     assert summary["I7"].value == "불공"
     assert summary["J7"].value == 500
     assert summary["I8"].value == "차감계"
-    assert summary["J8"].value == "=J6-J7"
+    assert summary["J8"].value == 1000
     assert summary["B9"].value == "불공"
     assert summary["B10"].value == 1
     assert summary["A14"].value == "③  상품매출"
@@ -129,3 +130,64 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     )
     assert workbook["거래상세"].max_row == 6
     assert workbook["검산"]["A1"].value.startswith("검산 결과")
+
+
+def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> None:
+    def row(
+        number: int,
+        division: str,
+        original_type: str,
+        supply: int,
+        tax: int,
+        code: str = "",
+        account_name: str = "",
+    ) -> dict[str, object]:
+        return {
+            "row_id": f"Sheet1:{number}",
+            "sheet": "Sheet1",
+            "source_row": number,
+            "division": division,
+            "date": date(2026, 4, number),
+            "month": "2026-04",
+            "vendor": "거래처",
+            "item": "품목",
+            "supply_amount": Decimal(supply),
+            "tax_amount": Decimal(tax),
+            "total_amount": Decimal(supply + tax),
+            "original_type": original_type,
+            "account_code": code,
+            "account_name": account_name,
+            "card_company": "",
+            "card_number": "",
+        }
+
+    rows = [
+        row(1, "매입", "과세", 1000, 100, "146", "상품"),
+        row(2, "매입", "불공", 200, 20, "813", "접대비"),
+        row(3, "매입", "공통", 150, 15, "813", "공통매입"),
+        row(4, "매입", "카과", 300, 30),
+        row(5, "매입", "현과", 400, 40),
+        row(6, "매입", "의제매입세액", 50, 5),
+        row(7, "매출", "과세", 1000, 100, "401", "상품매출"),
+    ]
+    settings = CompanySettings(name="테스트상사")
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "vat-layout.xlsx")
+
+    summary = load_workbook(output, data_only=False)["집계표"]
+    assert summary["I3"].value == "세금계산서 매입계"
+    assert summary["A7"].value == "②  카드외"
+    assert summary["E7"].value == "의제매입세액"
+    assert summary["I7"].value == "그 밖의 공제매입세액"
+    assert summary["J9"].value == "=SUM(J8:J8)"
+    assert summary["I10"].value == "계"
+    assert summary["J10"].value == 2100
+    assert summary["I11"].value == "불공"
+    assert summary["J11"].value == 200
+    assert summary["I12"].value == "공통"
+    assert summary["J12"].value == 150
+    assert summary["I13"].value == "차감계"
+    assert summary["J13"].value == 1750
+    assert summary["B14"].value == "불공"
+    assert summary["F14"].value == "공통"
+    assert summary["A19"].value == "③  상품매출"

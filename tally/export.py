@@ -300,11 +300,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             purchase_items.append(
                 (category, result.purchase_by_category, "account_category", category, False)
             )
-    for item in ("카과", "현과"):
-        if _has_values(result.purchase_summary, "item", item):
-            purchase_items.append((item, result.purchase_summary, "item", item, False))
-    if _has_values(result.purchase_summary, "item", "면세 매입"):
-        purchase_items.append(("면세", result.purchase_summary, "item", "면세 매입", True))
 
     purchase_title_row = 3
     rows_per_band = len(months) + 3
@@ -331,97 +326,98 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             last_purchase_detail_row = max(last_purchase_detail_row, total_row)
 
     purchase_total_row: int | None = None
-    purchase_summary_column: int | None = None
-    if _has_values(result.purchase_summary, "item", "과세 매입 총계"):
-        first_band_count = min(len(purchase_items), len(DETAIL_START_COLUMNS))
-        purchase_summary_column = 1 + first_band_count * 4
+    purchase_summary_column = 9
+    if _has_values(result.purchase_summary, "item", "세금계산서 매입계"):
         purchase_total_row = _write_compact_month_table(
             sheet,
             purchase_title_row,
             purchase_summary_column,
-            "①  계" if not purchase_items else "계",
+            "①  세금계산서 매입계" if not purchase_items else "세금계산서 매입계",
             result.purchase_summary,
             "item",
-            "과세 매입 총계",
+            "세금계산서 매입계",
             months,
         )
 
     purchase_end_row = max(last_purchase_detail_row, purchase_total_row or 2)
-    if purchase_total_row is not None and purchase_summary_column is not None:
-        supply_column = purchase_summary_column + 1
-        tax_column = purchase_summary_column + 2
-        supply_letter = get_column_letter(supply_column)
-        tax_letter = get_column_letter(tax_column)
-        declaration_row = purchase_total_row + 1
-        supply_cell = sheet.cell(
-            declaration_row,
-            supply_column,
-            f"={supply_letter}{purchase_total_row}",
+    other_items = [
+        (title, key)
+        for title, key in (("카드외", "카드외"), ("의제매입세액", "의제매입세액"))
+        if _has_values(result.purchase_summary, "item", key)
+    ]
+    if other_items:
+        other_title_row = purchase_end_row + 2
+        other_detail_end_row = other_title_row - 1
+        for slot, (title, key) in enumerate(other_items):
+            other_detail_end_row = max(
+                other_detail_end_row,
+                _write_month_table(
+                    sheet,
+                    other_title_row,
+                    DETAIL_START_COLUMNS[slot],
+                    title,
+                    result.purchase_summary,
+                    "item",
+                    key,
+                    months,
+                    marker="②" if slot == 0 else "",
+                ),
+            )
+        other_total_row = _write_compact_month_table(
+            sheet,
+            other_title_row,
+            purchase_summary_column,
+            "그 밖의 공제매입세액",
+            result.purchase_summary,
+            "item",
+            "그 밖의 공제매입세액",
+            months,
         )
-        tax_cell = sheet.cell(
-            declaration_row,
-            tax_column,
-            f"=ROUNDDOWN({supply_letter}{purchase_total_row}*0.1,0)",
-        )
-        for cell in (supply_cell, tax_cell):
-            _style_ledger_cell(cell, bold=True)
-            cell.border = Border()
-            cell.alignment = Alignment(horizontal="right", vertical="center")
-            cell.number_format = MONEY_FORMAT
-        purchase_end_row = max(purchase_end_row, declaration_row)
+        purchase_end_row = max(other_detail_end_row, other_total_row)
 
-        has_nondeductible = _has_values(result.purchase_summary, "item", "불공")
-        if has_nondeductible:
-            nondeductible_row = declaration_row + 1
-            label = sheet.cell(nondeductible_row, purchase_summary_column, "불공")
-            supply = sheet.cell(
-                nondeductible_row,
-                supply_column,
-                _total_value(result.purchase_summary, "item", "불공", "supply_amount"),
+    if _has_values(result.purchase_summary, "item", "매입세액 합계"):
+        summary_items = [("계", "매입세액 합계")]
+        for title in ("불공", "공통"):
+            if _has_values(result.purchase_summary, "item", title):
+                summary_items.append((title, title))
+        summary_items.append(("차감계", "차감계"))
+
+        summary_start_row = purchase_end_row + 1
+        for offset, (title, key) in enumerate(summary_items):
+            row = summary_start_row + offset
+            values = (
+                title,
+                _total_value(result.purchase_summary, "item", key, "supply_amount"),
+                _total_value(result.purchase_summary, "item", key, "tax_amount"),
             )
-            tax = sheet.cell(
-                nondeductible_row,
-                tax_column,
-                _total_value(result.purchase_summary, "item", "불공", "tax_amount"),
-            )
-            for cell in (label, supply, tax):
-                _style_ledger_cell(cell, bold=True)
-                cell.border = Border()
+            for column, value in zip(range(purchase_summary_column, purchase_summary_column + 3), values):
+                cell = sheet.cell(row, column, value)
+                _style_ledger_cell(cell, bold=True, total=title in {"계", "차감계"})
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-                cell.number_format = MONEY_FORMAT
+                if column > purchase_summary_column:
+                    cell.number_format = MONEY_FORMAT
+        purchase_end_row = summary_start_row + len(summary_items) - 1
 
-            deduction_row = nondeductible_row + 1
-            deduction_label = sheet.cell(deduction_row, purchase_summary_column, "차감계")
-            deduction_supply = sheet.cell(
-                deduction_row,
-                supply_column,
-                f"={supply_letter}{declaration_row}-{supply_letter}{nondeductible_row}",
-            )
-            deduction_tax = sheet.cell(
-                deduction_row,
-                tax_column,
-                f"={tax_letter}{declaration_row}-{tax_letter}{nondeductible_row}",
-            )
-            for cell in (deduction_label, deduction_supply, deduction_tax):
-                _style_ledger_cell(cell, bold=True)
-                cell.border = Border()
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-                cell.number_format = MONEY_FORMAT
-            purchase_end_row = max(purchase_end_row, deduction_row)
-
-            nondeductible_title_row = purchase_end_row + 1
-            nondeductible_total_row = _write_month_table(
-                sheet,
-                nondeductible_title_row,
-                1,
-                "불공",
-                result.purchase_summary,
-                "item",
-                "불공",
-                months,
-                title_start_column=2,
-            )
-            purchase_end_row = max(purchase_end_row, nondeductible_total_row)
+        deduction_items = [
+            title
+            for title in ("불공", "공통")
+            if _has_values(result.purchase_summary, "item", title)
+        ]
+        if deduction_items:
+            deduction_title_row = purchase_end_row + 1
+            for slot, title in enumerate(deduction_items):
+                deduction_total_row = _write_month_table(
+                    sheet,
+                    deduction_title_row,
+                    DETAIL_START_COLUMNS[slot],
+                    title,
+                    result.purchase_summary,
+                    "item",
+                    title,
+                    months,
+                    title_start_column=DETAIL_START_COLUMNS[slot] + 1,
+                )
+                purchase_end_row = max(purchase_end_row, deduction_total_row)
 
     sales_title_row = purchase_end_row + 3
     sales_accounts = [

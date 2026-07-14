@@ -65,6 +65,8 @@ def test_processing_keeps_nondeductible_in_tax_aggregate_then_subtracts_it() -> 
             transaction("r3", "매입", "카과", "", "", 300, 30),
             transaction("r4", "매입", "현과", "", "", 400, 40),
             transaction("r5", "매입", "면세", "", "", 500, 0),
+            transaction("r9", "매입", "공통", "813", "공통매입", 150, 15),
+            transaction("r10", "매입", "의제매입세액", "", "", 50, 5),
             transaction("r6", "매출", "과세", "401", "상품매출", 600, 60),
             transaction("r7", "매출", "카과", "401", "상품매출", 700, 70),
             transaction("r8", "매출", "현과", "401", "상품매출", -100, -10),
@@ -72,12 +74,17 @@ def test_processing_keeps_nondeductible_in_tax_aggregate_then_subtracts_it() -> 
     )
     result = process_transactions(data, CompanySettings(name="업체"))
     category_total = result.purchase_by_category["supply_amount"].sum()
-    assert category_total == Decimal(1200)
+    assert category_total == Decimal(1350)
 
     summary = result.purchase_summary.set_index("item")
-    assert summary.loc["과세 매입 총계", "supply_amount"] == Decimal(1900)
+    assert summary.loc["카드외", "supply_amount"] == Decimal(700)
+    assert summary.loc["의제매입세액", "supply_amount"] == Decimal(50)
+    assert summary.loc["그 밖의 공제매입세액", "supply_amount"] == Decimal(750)
+    assert summary.loc["매입세액 합계", "supply_amount"] == Decimal(2100)
     assert summary.loc["불공", "supply_amount"] == Decimal(200)
-    assert summary.loc["과매계", "supply_amount"] == Decimal(1700)
+    assert summary.loc["공통", "supply_amount"] == Decimal(150)
+    assert summary.loc["차감계", "supply_amount"] == Decimal(1750)
+    assert summary.loc["과매계", "supply_amount"] == Decimal(1750)
     assert summary.loc["면세 매입", "supply_amount"] == Decimal(500)
 
     sales = result.sales_summary.set_index("item")
@@ -98,9 +105,9 @@ def test_candidate_is_not_auto_confirmed_and_unclassified_fails_closed() -> None
     assert result.review.iloc[0]["review_status"] == "판단 보류"
     failures = set(result.validation.loc[result.validation["status"].eq("실패"), "check"])
     assert failures == {
-        "과세·불공 계정분류 건수",
-        "과세·불공 계정분류 공급가액",
-        "과세·불공 계정분류 세액",
+        "과세·불공·공통 계정분류 건수",
+        "과세·불공·공통 계정분류 공급가액",
+        "과세·불공·공통 계정분류 세액",
         "미분류 건수",
         "불공 판단 보류 건수",
     }

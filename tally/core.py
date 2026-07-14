@@ -11,8 +11,11 @@ from .settings import CompanySettings
 
 
 ZERO = Decimal("0")
-PURCHASE_TAX_TYPES = {"과세", "불공"}
+PURCHASE_REVIEW_TYPES = {"과세", "불공"}
+PURCHASE_COMMON_TYPES = {"공통", "공통매입", "공통매입세액"}
+PURCHASE_TAX_TYPES = PURCHASE_REVIEW_TYPES | PURCHASE_COMMON_TYPES
 PURCHASE_CARD_TYPES = {"카과", "현과"}
+PURCHASE_DEEMED_TYPES = {"의제", "의제매입", "의제매입세액"}
 SALES_TAX_TYPES = {"과세", "건별", "카과", "현과"}
 CATEGORY_ORDER = ["상품", "음식재료", "원재료(도급)", "제조경비", "도급경비", "기타", "고정"]
 
@@ -50,7 +53,7 @@ def classify_purchase_account(code: str, settings: CompanySettings) -> str:
 
 
 def find_nondeductible_candidate(row: pd.Series, settings: CompanySettings) -> str:
-    if row["division"] != "매입" or row["original_type"] not in PURCHASE_TAX_TYPES:
+    if row["division"] != "매입" or row["original_type"] not in PURCHASE_REVIEW_TYPES:
         return ""
     if row["original_type"] == "불공":
         return "원본 유형이 불공"
@@ -164,7 +167,7 @@ def process_transactions(
         if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
             category = classify_purchase_account(row["account_code"], settings)
         candidate = find_nondeductible_candidate(row, settings)
-        if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
+        if row["division"] == "매입" and row["original_type"] in PURCHASE_REVIEW_TYPES:
             status, final_type, reason, memo = _decision_values(
                 row["original_type"], candidate, decisions.get(row["row_id"], {})
             )
@@ -195,9 +198,14 @@ def process_transactions(
     card_tax = purchase[purchase["original_type"].eq("카과")]
     cash_tax = purchase[purchase["original_type"].eq("현과")]
     card_total = purchase[purchase["original_type"].isin(PURCHASE_CARD_TYPES)]
-    taxable_purchase = pd.concat([purchase_known, card_total], ignore_index=True)
+    deemed = purchase[purchase["original_type"].isin(PURCHASE_DEEMED_TYPES)]
+    other_deductible = pd.concat([card_total, deemed], ignore_index=True)
+    taxable_purchase = pd.concat([purchase_known, other_deductible], ignore_index=True)
     nondeductible = purchase_tax[purchase_tax["final_type"].eq("불공")]
-    deductible = taxable_purchase.copy()
+    common = purchase_tax[purchase_tax["final_type"].isin(PURCHASE_COMMON_TYPES)]
+    deductible = taxable_purchase[
+        ~taxable_purchase["final_type"].isin({"불공"} | PURCHASE_COMMON_TYPES)
+    ]
 
     purchase_summary = _summary_rows(
         {
@@ -207,22 +215,18 @@ def process_transactions(
             "카과": card_tax,
             "현과": cash_tax,
             "카드매입": card_total,
+            "카드외": card_total,
+            "의제매입세액": deemed,
+            "그 밖의 공제매입세액": other_deductible,
             "과세 매입 총계": taxable_purchase,
+            "매입세액 합계": taxable_purchase,
             "불공": nondeductible,
+            "공통": common,
             "면세 매입": purchase[purchase["original_type"].eq("면세")],
         }
     )
-    deductible_summary = _summary_rows({"과매계": deductible})
-    if not deductible_summary.empty:
-        for month in deductible_summary["month"].unique():
-            mask = deductible_summary["month"].eq(month)
-            nd = nondeductible[nondeductible["month"].eq(month)]
-            deductible_summary.loc[mask, "count"] -= len(nd)
-            for column in ("supply_amount", "tax_amount", "total_amount"):
-                deductible_summary.loc[mask, column] = deductible_summary.loc[mask, column].map(
-                    lambda value, amount=_numeric_total(nd, column): value - amount
-                )
-        purchase_summary = pd.concat([purchase_summary, deductible_summary], ignore_index=True)
+    deductible_summary = _summary_rows({"과매계": deductible, "차감계": deductible})
+    purchase_summary = pd.concat([purchase_summary, deductible_summary], ignore_index=True)
 
     sales = data[data["division"].eq("매출")]
     taxable_sales = sales[sales["original_type"].isin(SALES_TAX_TYPES)]
@@ -238,7 +242,7 @@ def process_transactions(
 
     review = data[
         (data["division"].eq("매입"))
-        & (data["original_type"].isin(PURCHASE_TAX_TYPES))
+        & (data["original_type"].isin(PURCHASE_REVIEW_TYPES))
         & (
             data["original_type"].eq("불공")
             | data["candidate_reason"].ne("")
@@ -252,15 +256,15 @@ def process_transactions(
         _validation_row("공급가액 합계", _numeric_total(transactions, "supply_amount"), _numeric_total(data, "supply_amount")),
         _validation_row("세액 합계", _numeric_total(transactions, "tax_amount"), _numeric_total(data, "tax_amount")),
         _validation_row("합계금액 합계", _numeric_total(transactions, "total_amount"), _numeric_total(data, "total_amount")),
-        _validation_row("과세·불공 계정분류 건수", len(purchase_tax), len(purchase_known)),
+        _validation_row("과세·불공·공통 계정분류 건수", len(purchase_tax), len(purchase_known)),
         _validation_row(
-            "과세·불공 계정분류 공급가액",
+            "과세·불공·공통 계정분류 공급가액",
             _numeric_total(purchase_tax, "supply_amount"),
             _numeric_total(purchase_known, "supply_amount"),
             detail="미분류가 있으면 실패합니다.",
         ),
         _validation_row(
-            "과세·불공 계정분류 세액",
+            "과세·불공·공통 계정분류 세액",
             _numeric_total(purchase_tax, "tax_amount"),
             _numeric_total(purchase_known, "tax_amount"),
         ),
@@ -278,15 +282,20 @@ def process_transactions(
         ),
         _validation_row(
             "과세 매입 총계 관계",
-            _numeric_total(purchase_known, "total_amount") + _numeric_total(card_total, "total_amount"),
+            _numeric_total(purchase_known, "total_amount") + _numeric_total(other_deductible, "total_amount"),
             _numeric_total(taxable_purchase, "total_amount"),
-            detail="세금계산서 매입계 + 카과 + 현과",
+            detail="세금계산서 매입계 + 카드외 + 의제매입세액",
         ),
         _validation_row(
             "과매계 관계",
-            _numeric_total(taxable_purchase, "total_amount") - _numeric_total(nondeductible, "total_amount"),
-            _numeric_total(deductible_summary, "total_amount"),
-            detail="과세 매입 총계 - 최종 불공",
+            _numeric_total(taxable_purchase, "total_amount")
+            - _numeric_total(nondeductible, "total_amount")
+            - _numeric_total(common, "total_amount"),
+            _numeric_total(
+                deductible_summary[deductible_summary["item"].eq("과매계")],
+                "total_amount",
+            ),
+            detail="매입세액 합계 - 최종 불공 - 공통",
         ),
         _validation_row(
             "과세매출 공급가액",
