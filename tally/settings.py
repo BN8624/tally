@@ -12,6 +12,17 @@ class CompanySettings:
     account_146_label: str = "상품"
     fixed_asset_codes: set[str] = field(default_factory=set)
     account_overrides: dict[str, str] = field(default_factory=dict)
+    tobacco_vendor_keywords: list[str] = field(
+        default_factory=lambda: [
+            "삼양인터내셔널",
+            "케이티앤지",
+            "KT&G",
+            "제이티인터내셔널",
+            "JTI",
+            "로스만스파이스트",
+            "로스만스",
+        ]
+    )
     vehicle_keywords: list[str] = field(
         default_factory=lambda: ["차량유지비", "주유", "수리", "타이어", "세차", "자동차"]
     )
@@ -45,6 +56,20 @@ class CompanySettings:
             account_146_label=str(data.get("account_146_label", "상품")),
             fixed_asset_codes=set(data.get("fixed_asset_codes", [])),
             account_overrides=dict(data.get("account_overrides", {})),
+            tobacco_vendor_keywords=list(
+                data.get(
+                    "tobacco_vendor_keywords",
+                    [
+                        "삼양인터내셔널",
+                        "케이티앤지",
+                        "KT&G",
+                        "제이티인터내셔널",
+                        "JTI",
+                        "로스만스파이스트",
+                        "로스만스",
+                    ],
+                )
+            ),
             vehicle_keywords=list(data.get("vehicle_keywords", [])),
             vendor_keywords=list(data.get("vendor_keywords", [])),
             personal_keywords=list(data.get("personal_keywords", [])),
@@ -73,4 +98,3 @@ class SettingsStore:
             return self.load_all()[name]
         except KeyError as exc:
             raise KeyError(f"업체 설정을 찾을 수 없습니다. 업체명={name}") from exc
-
