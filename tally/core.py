@@ -17,7 +17,20 @@ PURCHASE_TAX_TYPES = PURCHASE_REVIEW_TYPES | PURCHASE_COMMON_TYPES
 PURCHASE_CARD_TYPES = {"카과", "현과"}
 PURCHASE_DEEMED_TYPES = {"의제", "의제매입", "의제매입세액"}
 SALES_TAX_TYPES = {"과세", "건별", "카과", "현과"}
-CATEGORY_ORDER = ["상품", "음식재료", "원재료(도급)", "제조경비", "도급경비", "기타", "고정"]
+SALES_CARD_TYPES = {"카과", "카면", "카영"}
+SALES_CARD_EXEMPT_TYPES = {"카면", "카영"}
+SALES_CASH_TYPES = {"현과", "현면", "현영"}
+SALES_CASH_EXEMPT_TYPES = {"현면", "현영"}
+CATEGORY_ORDER = [
+    "상품",
+    "음식재료",
+    "담배",
+    "원재료(도급)",
+    "제조경비",
+    "도급경비",
+    "기타",
+    "고정",
+]
 
 
 @dataclass(slots=True)
@@ -52,6 +65,19 @@ def classify_purchase_account(code: str, settings: CompanySettings) -> str:
         if code.startswith("8"):
             return "기타"
     return "미분류"
+
+
+def _matches_keyword(value: object, keywords: list[str]) -> bool:
+    normalized = str(value or "").casefold().replace(" ", "")
+    return any(keyword.casefold().replace(" ", "") in normalized for keyword in keywords)
+
+
+def _is_zero_pay(row: pd.Series) -> bool:
+    context = " ".join(
+        str(row.get(column, ""))
+        for column in ("vendor", "item", "card_company", "card_number")
+    )
+    return "제로페이" in context.replace(" ", "")
 
 
 def find_nondeductible_candidate(row: pd.Series, settings: CompanySettings) -> str:
@@ -168,6 +194,10 @@ def process_transactions(
         category = ""
         if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
             category = classify_purchase_account(row["account_code"], settings)
+            if category == settings.account_146_label and _matches_keyword(
+                row["vendor"], settings.tobacco_vendor_keywords
+            ):
+                category = "담배"
         candidate = find_nondeductible_candidate(row, settings)
         if row["division"] == "매입" and row["original_type"] in PURCHASE_REVIEW_TYPES:
             status, final_type, reason, memo = _decision_values(
@@ -232,13 +262,30 @@ def process_transactions(
 
     sales = data[data["division"].eq("매출")]
     taxable_sales = sales[sales["original_type"].isin(SALES_TAX_TYPES)]
-    sales_by_account = _aggregate(taxable_sales, ["account_name", "month"])
+    invoice_taxable_sales = sales[sales["original_type"].eq("과세")]
+    invoice_exempt_sales = sales[sales["original_type"].eq("면세")]
+    zero_pay_mask = sales.apply(_is_zero_pay, axis=1)
+    zero_pay_sales = sales[sales["original_type"].eq("카과") & zero_pay_mask]
+    card_taxable_sales = sales[sales["original_type"].eq("카과") & ~zero_pay_mask]
+    card_exempt_sales = sales[sales["original_type"].isin(SALES_CARD_EXEMPT_TYPES)]
+    card_sales = pd.concat([card_taxable_sales, card_exempt_sales], ignore_index=True)
+    cash_taxable_sales = sales[sales["original_type"].eq("현과")]
+    cash_exempt_sales = sales[sales["original_type"].isin(SALES_CASH_EXEMPT_TYPES)]
+    cash_sales = pd.concat([cash_taxable_sales, cash_exempt_sales], ignore_index=True)
+    sales_by_account = _aggregate(invoice_taxable_sales, ["account_name", "month"])
     sales_summary = _summary_rows(
         {
             "과세매출 총계": taxable_sales,
-            "면세 매출": sales[sales["original_type"].eq("면세")],
-            "카드매출": sales[sales["original_type"].eq("카과")],
-            "현영매출": sales[sales["original_type"].eq("현과")],
+            "세금계산서 매출": invoice_taxable_sales,
+            "면세 매출": invoice_exempt_sales,
+            "면세 계산서 매출": invoice_exempt_sales,
+            "카드 과세": card_taxable_sales,
+            "카드 면세": card_exempt_sales,
+            "카드매출": card_sales,
+            "현영 과세": cash_taxable_sales,
+            "현영 면세": cash_exempt_sales,
+            "현영매출": cash_sales,
+            "제로페이": zero_pay_sales,
         }
     )
 
@@ -306,14 +353,17 @@ def process_transactions(
         ),
         _validation_row(
             "카드매출 보조표",
-            _numeric_total(sales[sales["original_type"].eq("카과")], "total_amount"),
+            _numeric_total(sales[sales["original_type"].isin(SALES_CARD_TYPES)], "total_amount"),
             _numeric_total(
                 sales_summary[sales_summary["item"].eq("카드매출")], "total_amount"
+            )
+            + _numeric_total(
+                sales_summary[sales_summary["item"].eq("제로페이")], "total_amount"
             ),
         ),
         _validation_row(
             "현영매출 보조표",
-            _numeric_total(sales[sales["original_type"].eq("현과")], "total_amount"),
+            _numeric_total(sales[sales["original_type"].isin(SALES_CASH_TYPES)], "total_amount"),
             _numeric_total(
                 sales_summary[sales_summary["item"].eq("현영매출")], "total_amount"
             ),
