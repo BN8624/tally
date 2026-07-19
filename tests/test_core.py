@@ -127,3 +127,14 @@ def test_candidate_decision_can_be_applied_and_negative_transaction_counts_as_on
     assert result.purchase_summary.set_index("item").loc["불공", "count"] == 1
     assert result.purchase_summary.set_index("item").loc["불공", "supply_amount"] == Decimal(-100)
     assert result.validation_passed
+
+
+def test_zero_pay_detection_allows_intermediate_card_brand_text() -> None:
+    row = transaction("r1", "매출", "카과", "401", "상품매출", 200, 20)
+    row["vendor"] = "제로(온누리)페이"
+
+    result = process_transactions(pd.DataFrame([row]), CompanySettings(name="업체"))
+    sales = result.sales_summary.set_index("item")
+
+    assert sales.loc["제로페이", "total_amount"] == Decimal(220)
+    assert "카드매출" not in sales.index

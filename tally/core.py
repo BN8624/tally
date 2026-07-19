@@ -77,7 +77,8 @@ def _is_zero_pay(row: pd.Series) -> bool:
         str(row.get(column, ""))
         for column in ("vendor", "item", "card_company", "card_number")
     )
-    return "제로페이" in context.replace(" ", "")
+    normalized = context.casefold().replace(" ", "")
+    return "제로페이" in normalized or ("제로" in normalized and "페이" in normalized)
 
 
 def find_nondeductible_candidate(row: pd.Series, settings: CompanySettings) -> str:
@@ -255,6 +256,7 @@ def process_transactions(
             "불공": nondeductible,
             "공통": common,
             "면세 매입": purchase[purchase["original_type"].eq("면세")],
+            "영세 매입": purchase[purchase["original_type"].eq("영세")],
         }
     )
     deductible_summary = _summary_rows({"과매계": deductible, "차감계": deductible})
@@ -286,6 +288,8 @@ def process_transactions(
             "현영 면세": cash_exempt_sales,
             "현영매출": cash_sales,
             "제로페이": zero_pay_sales,
+            "기타": sales[sales["original_type"].eq("건별")],
+            "기타 면세": sales[sales["original_type"].isin({"면건"})],
         }
     )
 

@@ -1,6 +1,7 @@
 # 업체 설정부터 불공 검토와 결과 저장까지 제공하는 로컬 데스크톱 앱입니다.
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -107,6 +108,8 @@ class TallyApp(tk.Tk):
         self.decisions: dict[str, dict[str, str]] = {}
         self.file_var = tk.StringVar()
         self.company_var = tk.StringVar()
+        self.prior_credit_var = tk.StringVar()
+        self.card_deduction_var = tk.StringVar()
         self.filter_var = tk.StringVar(value="전체")
         self.decision_var = tk.StringVar(value="과세 유지")
         self.reason_var = tk.StringVar()
@@ -151,9 +154,13 @@ class TallyApp(tk.Tk):
         ttk.Label(form, text="전체 매입매출장").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=8)
         ttk.Entry(form, textvariable=self.file_var, state="readonly").grid(row=1, column=1, sticky="ew", pady=8)
         ttk.Button(form, text="엑셀 선택", command=self._select_file).grid(row=1, column=2, padx=(10, 0))
+        ttk.Label(form, text="예정미환급세액 · 선택").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=8)
+        ttk.Entry(form, textvariable=self.prior_credit_var).grid(row=2, column=1, sticky="ew", pady=8)
+        ttk.Label(form, text="카드매출 세액공제 · 선택").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=8)
+        ttk.Entry(form, textvariable=self.card_deduction_var).grid(row=3, column=1, sticky="ew", pady=8)
         form.columnconfigure(1, weight=1)
         ttk.Button(form, text="처리 시작", command=self._process_file).grid(
-            row=2, column=0, columnspan=3, sticky="ew", pady=(18, 0)
+            row=4, column=0, columnspan=3, sticky="ew", pady=(18, 0)
         )
 
         guide = (
@@ -469,8 +476,32 @@ class TallyApp(tk.Tk):
         )
         if not path:
             return
-        export_workbook(self.result, self.store.get(self.company_var.get()), path)
+        try:
+            prior_credit = self._optional_amount(self.prior_credit_var.get(), "예정미환급세액")
+            card_deduction = self._optional_amount(self.card_deduction_var.get(), "카드매출 세액공제")
+        except ValueError as exc:
+            messagebox.showerror("조정액 입력 오류", str(exc), parent=self)
+            return
+        settings = replace(
+            self.store.get(self.company_var.get()),
+            prior_period_credit=prior_credit,
+            card_sales_deduction=card_deduction,
+        )
+        export_workbook(self.result, settings, path)
         messagebox.showinfo("저장 완료", f"결과 엑셀을 저장했습니다.\n{Path(path)}", parent=self)
+
+    @staticmethod
+    def _optional_amount(value: str, label: str) -> int:
+        normalized = value.replace(",", "").strip()
+        if not normalized:
+            return 0
+        try:
+            amount = int(normalized)
+        except ValueError as exc:
+            raise ValueError(f"{label}은 쉼표를 제외한 정수 금액으로 입력하세요.") from exc
+        if amount < 0:
+            raise ValueError(f"{label}은 0 이상이어야 합니다.")
+        return amount
 
 
 def main() -> None:

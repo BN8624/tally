@@ -10,6 +10,8 @@ from pathlib import Path
 class CompanySettings:
     name: str
     account_146_label: str = "상품"
+    prior_period_credit: int = 0
+    card_sales_deduction: int = 0
     fixed_asset_codes: set[str] = field(default_factory=set)
     account_overrides: dict[str, str] = field(default_factory=dict)
     tobacco_vendor_keywords: list[str] = field(
@@ -37,6 +39,10 @@ class CompanySettings:
             raise ValueError("업체명은 비워둘 수 없습니다.")
         if self.account_146_label not in {"상품", "음식재료"}:
             raise ValueError("146번 표시 명칭은 상품 또는 음식재료여야 합니다.")
+        self.prior_period_credit = int(self.prior_period_credit)
+        self.card_sales_deduction = int(self.card_sales_deduction)
+        if self.prior_period_credit < 0 or self.card_sales_deduction < 0:
+            raise ValueError("예정미환급세액과 카드매출 세액공제는 0 이상이어야 합니다.")
         self.fixed_asset_codes = {str(code).strip() for code in self.fixed_asset_codes if str(code).strip()}
         self.account_overrides = {
             str(code).strip(): str(category).strip()
@@ -54,6 +60,8 @@ class CompanySettings:
         return cls(
             name=str(data["name"]),
             account_146_label=str(data.get("account_146_label", "상품")),
+            prior_period_credit=int(data.get("prior_period_credit", 0)),
+            card_sales_deduction=int(data.get("card_sales_deduction", 0)),
             fixed_asset_codes=set(data.get("fixed_asset_codes", [])),
             account_overrides=dict(data.get("account_overrides", {})),
             tobacco_vendor_keywords=list(
