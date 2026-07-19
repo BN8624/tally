@@ -632,7 +632,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         ]
         overall_supply_ref = base_supply_ref
         overall_tax_ref = base_tax_ref
-        if other_rows or deduction_labels:
+        if other_rows:
             overall_row = summary_row
             write_summary_row(
                 overall_row,
