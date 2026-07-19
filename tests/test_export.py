@@ -100,28 +100,26 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary.row_dimensions[5].height == 25
     assert summary["J5"].border.bottom.style == "dotted"
     assert summary["J5"].border.top.style == "medium"
-    assert summary["H6"].value == "계"
-    assert summary["I6"].value == "=I5"
-    assert summary["J6"].value == "=J5"
+    assert summary["H6"].value == "불공"
+    assert summary["I6"].value == 500
+    assert summary["J6"].value == 50
     assert summary.row_dimensions[6].height == 25
     assert summary["I6"].alignment.vertical == "bottom"
-    assert summary["H7"].value == "불공"
-    assert summary["I7"].value == 500
-    assert summary["H8"].value == "차감계"
-    assert summary["I8"].value == "=I6-I7"
-    assert summary["F9"].value == "납부"
-    assert summary["G9"].value == "=D20-J8"
-    assert summary["B12"].value == "불공"
-    assert summary["B13"].value == 1
-    assert summary["B20"].value == "카드외"
-    assert summary["C20"].value == "=ROUNDUP(G24/1.1,0)"
-    assert summary["D20"].value == "=G24-C20"
-    assert summary["B23"].value == "카드 합계\n(카과+카면+카영)"
-    assert summary["B24"].value == 2200
-    assert summary["B25"].value == "=SUM(B24:B24)"
-    assert summary["G23"].value == "카드"
-    assert summary["F24"].value == "과세"
-    assert summary["G24"].value == 2200
+    assert summary["H7"].value == "차감계"
+    assert summary["I7"].value == "=I5-I6"
+    assert summary["F8"].value == "납부"
+    assert summary["G8"].value == "=D19-J7"
+    assert summary["B11"].value == "불공"
+    assert summary["B12"].value == 1
+    assert summary["B19"].value == "카드외"
+    assert summary["C19"].value == "=ROUNDUP(G23/1.1,0)"
+    assert summary["D19"].value == "=G23-C19"
+    assert summary["B22"].value == "카드 합계\n(카과+카면+카영)"
+    assert summary["B23"].value == 2200
+    assert summary["B24"].value == "=SUM(B23:B23)"
+    assert summary["G22"].value == "카드"
+    assert summary["F23"].value == "과세"
+    assert summary["G23"].value == 2200
     assert not any(
         cell.value
         in {"원재료(도급)", "제조경비", "도급경비", "고정", "현과", "면세"}
@@ -131,7 +129,7 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["A3"].fill.fill_type == "solid"
     assert summary["A3"].fill.fgColor.rgb.endswith("FFFFFF")
     assert summary["A3"].border.bottom.style == "dotted"
-    assert summary.print_area == "'집계표'!$A$1:$J$25"
+    assert summary.print_area == "'집계표'!$A$1:$J$24"
     assert summary.page_setup.orientation == "portrait"
     assert summary.page_setup.paperWidth == "170mm"
     assert summary.page_setup.paperHeight == "240mm"
@@ -215,6 +213,44 @@ def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> 
     assert summary["B19"].value == "불공"
     assert summary["E19"].value == "공통"
     assert summary["A27"].value == "③  상품매출 · 세금계산서 매출"
+
+
+def test_purchase_rounding_with_only_deduction_skips_intermediate_total(tmp_path) -> None:
+    rows = []
+    for number, original_type, code, supply, tax in (
+        (1, "과세", "146", 800, 79),
+        (2, "불공", "813", 200, 20),
+    ):
+        rows.append(
+            {
+                "row_id": f"Sheet1:{number}",
+                "sheet": "Sheet1",
+                "source_row": number,
+                "division": "매입",
+                "date": date(2026, 4, number),
+                "month": "2026-04",
+                "vendor": "거래처",
+                "item": "품목",
+                "supply_amount": Decimal(supply),
+                "tax_amount": Decimal(tax),
+                "total_amount": Decimal(supply + tax),
+                "original_type": original_type,
+                "account_code": code,
+                "account_name": "상품" if code == "146" else "접대비",
+                "card_company": "",
+                "card_number": "",
+            }
+        )
+
+    settings = CompanySettings(name="중간계제외")
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "no-duplicate-total.xlsx")
+    summary = load_workbook(output, data_only=False)["집계표"]
+
+    assert summary["H6"].value == "단수차이 조정"
+    assert summary["H7"].value == "불공"
+    assert summary["H8"].value == "차감계"
+    assert summary["I8"].value == "=I6-I7"
 
 
 def test_export_splits_fixed_assets_after_rounding_adjustment(tmp_path) -> None:
