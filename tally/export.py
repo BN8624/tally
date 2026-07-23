@@ -311,6 +311,46 @@ def _sales_account_display(account: str) -> str:
     return account
 
 
+def _write_sales_account_columns(
+    sheet,
+    title_row: int,
+    accounts: list[str],
+    frame: pd.DataFrame,
+    months: list[str],
+    *,
+    start_column: int = 5,
+) -> int:
+    for offset, account in enumerate(accounts):
+        column = start_column + offset
+        title_cell = sheet.cell(title_row, column, _sales_account_display(account))
+        _style_ledger_cell(title_cell, bold=True)
+        title_cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+        for month_index, month in enumerate(months, start=1):
+            cell = sheet.cell(
+                title_row + month_index,
+                column,
+                _lookup(frame, "account_name", account, month, "supply_amount"),
+            )
+            _style_ledger_cell(cell)
+            cell.alignment = Alignment(horizontal="right", vertical="bottom")
+            cell.number_format = MONEY_FORMAT
+        total_row = title_row + len(months) + 1
+        letter = get_column_letter(column)
+        cell = sheet.cell(
+            total_row,
+            column,
+            f"=SUM({letter}{title_row + 1}:{letter}{total_row - 1})",
+        )
+        _style_ledger_cell(cell, bold=True, total=True)
+        cell.alignment = Alignment(horizontal="right", vertical="bottom")
+        cell.number_format = MONEY_FORMAT
+    return title_row + len(months) + 1
+
+
 def _write_shared_month_band(
     sheet,
     title_row: int,
@@ -670,9 +710,18 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         purchase_end_row = max(purchase_end_row, summary_row - 1)
 
     detail_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = []
-    for label in ("카과", "현과"):
+    for label in ("카과", "현과", "카면", "카영", "현면", "현영"):
         if _has_values(result.purchase_summary, "item", label):
-            detail_items.append((label, result.purchase_summary, "item", label, False, False))
+            detail_items.append(
+                (
+                    label,
+                    result.purchase_summary,
+                    "item",
+                    label,
+                    label in {"카면", "카영", "현면", "현영"},
+                    False,
+                )
+            )
     if _has_values(result.purchase_summary, "item", "의제매입세액"):
         detail_items.append(
             ("의제매입세액", result.purchase_summary, "item", "의제매입세액", False, False)
@@ -694,17 +743,32 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         for account in sorted(result.sales_by_account["account_name"].dropna().astype(str).unique())
         if _has_values(result.sales_by_account, "account_name", account)
     ]
-    sales_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = [
-        (
-            f"{_sales_account_display(account)} · 세금계산서 매출",
-            result.sales_by_account,
-            "account_name",
-            account,
-            False,
-            False,
-        )
-        for account in sales_accounts
-    ]
+    multiple_sales_accounts = len(sales_accounts) > 1
+    if multiple_sales_accounts:
+        sales_items: list[
+            tuple[str, pd.DataFrame, str, str, bool, bool] | None
+        ] = [
+            (
+                "세금계산서 매출",
+                result.sales_summary,
+                "item",
+                "세금계산서 매출",
+                False,
+                False,
+            )
+        ]
+    else:
+        sales_items = [
+            (
+                f"{_sales_account_display(account)} · 세금계산서 매출",
+                result.sales_by_account,
+                "account_name",
+                account,
+                False,
+                False,
+            )
+            for account in sales_accounts
+        ]
     if _has_values(result.sales_summary, "item", "면세 계산서 매출"):
         sales_items.append(
             (
@@ -721,6 +785,8 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         max(0, len(detail_items) - slots_per_band),
         max(0, slots_per_band - min(len(sales_items), slots_per_band)),
     )
+    if multiple_sales_accounts:
+        deferred_detail_count = 0
     if not sales_items:
         deferred_detail_count = 0
     deferred_detail_items = (
@@ -760,6 +826,8 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         list[tuple[str, pd.DataFrame, str, str, bool, bool] | None]
     ] = []
     remaining_sales_items = list(sales_items)
+    if multiple_sales_accounts and remaining_sales_items:
+        sales_bands.append([remaining_sales_items.pop(0)])
     if deferred_detail_items:
         first_sales_count = min(
             len(remaining_sales_items),
@@ -796,9 +864,19 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             marker="③" if band_index == 0 else "",
             first_title_in_month_column=band_index == 0,
         )
+        if multiple_sales_accounts and band_index == 0:
+            _write_sales_account_columns(
+                sheet,
+                title_row,
+                sales_accounts,
+                result.sales_by_account,
+                months,
+            )
         sales_end_row = max(sales_end_row, band_total_row)
         for slot, item in enumerate(band_items):
-            if item is not None and item[2] == "account_name":
+            if item is not None and (
+                item[2] == "account_name" or item[3] == "세금계산서 매출"
+            ):
                 supply_column = SHARED_VALUE_START_COLUMNS[slot] + 1
                 taxable_sales_refs.append(
                     f"{get_column_letter(supply_column)}{band_total_row}"
@@ -949,6 +1027,9 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         payment_start_row = purchase_end_row + 1
         payment_label_column = summary_end_column - 4
         payment_value_column = summary_end_column - 3
+        if compact_wide_layout and len(visible_detail_items) == 3:
+            payment_label_column = summary_end_column - 1
+            payment_value_column = summary_end_column
         payment_rows: list[tuple[str, object]] = [
             ("납부", f"={sales_tax_ref}-{purchase_deductible_tax_ref}"),
         ]
@@ -1095,11 +1176,15 @@ def export_workbook(
 
     detail_headers = [
         ("row_id", "원본 행 ID"),
+        ("sheet", "원본 시트"),
+        ("source_row", "원본 행"),
         ("date", "전표일자"),
         ("division", "매입·매출"),
         ("month", "월"),
         ("vendor", "거래처"),
         ("item", "품명"),
+        ("card_company", "카드사"),
+        ("card_number", "카드번호"),
         ("supply_amount", "공급가액"),
         ("tax_amount", "세액"),
         ("total_amount", "합계금액"),
