@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -285,15 +285,24 @@ def _write_total_amount_table(
     return total_row, total_columns
 
 
-def _ordered_categories(settings: CompanySettings) -> list[str]:
-    return [
+def _ordered_categories(
+    settings: CompanySettings,
+    frame: pd.DataFrame,
+) -> list[str]:
+    preferred = [
         settings.account_146_label,
         "담배",
         "원재료(도급)",
         "제조경비",
         "도급경비",
-        "기타",
     ]
+    observed = {
+        str(value)
+        for value in frame.get("account_category", pd.Series(dtype="object")).dropna()
+        if str(value) not in {"", "미분류", "고정", "기타"}
+    }
+    custom = sorted(observed.difference(preferred))
+    return preferred + custom + ["기타"]
 
 
 def _sales_account_display(account: str) -> str:
@@ -484,23 +493,30 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     months = sorted(result.transactions["month"].dropna().astype(str).unique())
     purchase_categories = [
         category
-        for category in _ordered_categories(settings)
+        for category in _ordered_categories(settings, result.purchase_by_category)
         if _has_values(result.purchase_by_category, "account_category", category)
     ]
     if _has_values(result.purchase_by_category, "account_category", "고정"):
         purchase_categories.insert(min(2, len(purchase_categories)), "고정")
-
-    slots_per_band = 4 if "담배" in purchase_categories else 3
-    summary_end_column = 1 + 3 * max(3, slots_per_band)
-    _set_summary_heading(sheet, settings.name, months, summary_end_column)
-    rows_per_band = len(months) + 3
 
     purchase_items: list[tuple[str, pd.DataFrame, str, str, bool, bool] | None] = [
         (category, result.purchase_by_category, "account_category", category, False, False)
         for category in purchase_categories
     ]
     invoice_present = _has_values(result.purchase_summary, "item", "세금계산서 매입계")
+    item_count = len(purchase_items) + int(invoice_present)
+    slots_per_band = (
+        4
+        if "담배" in purchase_categories or (len(months) > 3 and item_count == 4)
+        else 3
+    )
+    summary_end_column = 1 + 3 * max(3, slots_per_band)
+    _set_summary_heading(sheet, settings.name, months, summary_end_column)
+    rows_per_band = len(months) + 3
+
     purchase_deductible_tax_ref: str | None = None
+    invoice_total_row: int | None = None
+    has_fixed_purchase = _has_values(result.purchase_summary, "item", "고정")
     if invoice_present:
         purchase_items.append(
             ("세금계산서 매입계", result.purchase_summary, "item", "세금계산서 매입계", False, False)
@@ -551,42 +567,18 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
                 if column != invoice_count_column:
                     cell.number_format = MONEY_FORMAT
 
-        invoice_supply_total = _total_value(
-            result.purchase_summary,
-            "item",
-            "세금계산서 매입계",
-            "supply_amount",
+        adjustment_row = invoice_total_row + 1
+        write_summary_row(
+            adjustment_row,
+            "단수차이 조정",
+            f"={invoice_supply_ref}",
+            f"=ROUNDDOWN({supply_letter}{adjustment_row}*0.1,0)",
         )
-        invoice_tax_total = _total_value(
-            result.purchase_summary,
-            "item",
-            "세금계산서 매입계",
-            "tax_amount",
-        )
-        adjusted_tax_total = int(
-            (Decimal(str(invoice_supply_total)) * Decimal("0.1")).quantize(
-                Decimal("1"),
-                rounding=ROUND_DOWN,
-            )
-        )
-        needs_adjustment = adjusted_tax_total != int(invoice_tax_total)
-        if needs_adjustment:
-            adjustment_row = invoice_total_row + 1
-            write_summary_row(
-                adjustment_row,
-                "단수차이 조정",
-                f"={invoice_supply_ref}",
-                f"=ROUNDDOWN({supply_letter}{adjustment_row}*0.1,0)",
-            )
-            base_supply_ref = f"{supply_letter}{adjustment_row}"
-            base_tax_ref = f"{tax_letter}{adjustment_row}"
-            summary_row = adjustment_row + 1
-        else:
-            base_supply_ref = invoice_supply_ref
-            base_tax_ref = invoice_tax_ref
-            summary_row = invoice_total_row + 1
+        base_supply_ref = f"{supply_letter}{adjustment_row}"
+        base_tax_ref = f"{tax_letter}{adjustment_row}"
+        summary_row = adjustment_row + 1
 
-        if _has_values(result.purchase_summary, "item", "고정"):
+        if has_fixed_purchase:
             general_row = summary_row
             fixed_row = general_row + 1
             split_total_row = fixed_row + 1
@@ -697,23 +689,6 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             ("영세 매입", result.purchase_summary, "item", "영세 매입", True, False)
         )
 
-    detail_end_row = purchase_end_row
-    payment_adjustment_count = int(bool(settings.card_sales_deduction)) + int(
-        bool(settings.prior_period_credit)
-    )
-    payment_row_count = 1 + payment_adjustment_count + int(payment_adjustment_count > 0)
-    if detail_items:
-        detail_title_row = purchase_end_row + max(4, payment_row_count + 1)
-        for item_index in range(0, len(detail_items), slots_per_band):
-            title_row = detail_title_row + (item_index // slots_per_band) * rows_per_band
-            detail_end_row = _write_shared_month_band(
-                sheet,
-                title_row,
-                detail_items[item_index : item_index + slots_per_band],
-                months,
-                marker="②" if item_index == 0 else "",
-            )
-
     sales_accounts = [
         account
         for account in sorted(result.sales_by_account["account_name"].dropna().astype(str).unique())
@@ -742,20 +717,84 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             )
         )
 
-    sales_title_row = detail_end_row + 6
+    deferred_detail_count = min(
+        max(0, len(detail_items) - slots_per_band),
+        max(0, slots_per_band - min(len(sales_items), slots_per_band)),
+    )
+    if not sales_items:
+        deferred_detail_count = 0
+    deferred_detail_items = (
+        detail_items[-deferred_detail_count:] if deferred_detail_count else []
+    )
+    visible_detail_items = (
+        detail_items[:-deferred_detail_count] if deferred_detail_count else detail_items
+    )
+
+    detail_end_row = purchase_end_row
+    payment_adjustment_count = int(bool(settings.card_sales_deduction)) + int(
+        bool(settings.prior_period_credit)
+    )
+    payment_row_count = 1 + payment_adjustment_count + int(payment_adjustment_count > 0)
+    compact_wide_layout = (
+        slots_per_band == 4
+        and invoice_total_row is not None
+        and 0 < len(visible_detail_items) <= 3
+    )
+    if visible_detail_items:
+        detail_title_row = (
+            invoice_total_row + (3 if has_fixed_purchase else 2)
+            if compact_wide_layout
+            else purchase_end_row + max(4, payment_row_count + 1)
+        )
+        for item_index in range(0, len(visible_detail_items), slots_per_band):
+            title_row = detail_title_row + (item_index // slots_per_band) * rows_per_band
+            detail_end_row = _write_shared_month_band(
+                sheet,
+                title_row,
+                visible_detail_items[item_index : item_index + slots_per_band],
+                months,
+                marker="②" if item_index == 0 else "",
+            )
+
+    sales_bands: list[
+        list[tuple[str, pd.DataFrame, str, str, bool, bool] | None]
+    ] = []
+    remaining_sales_items = list(sales_items)
+    if deferred_detail_items:
+        first_sales_count = min(
+            len(remaining_sales_items),
+            slots_per_band - len(deferred_detail_items),
+        )
+        first_sales_items = remaining_sales_items[:first_sales_count]
+        remaining_sales_items = remaining_sales_items[first_sales_count:]
+        sales_bands.append(
+            first_sales_items
+            + [None]
+            * (slots_per_band - len(first_sales_items) - len(deferred_detail_items))
+            + deferred_detail_items
+        )
+    for item_index in range(0, len(remaining_sales_items), slots_per_band):
+        sales_bands.append(
+            remaining_sales_items[item_index : item_index + slots_per_band]
+        )
+
+    if compact_wide_layout:
+        sales_gap = 4 if has_fixed_purchase else 2
+    else:
+        sales_gap = 6
+    sales_title_row = detail_end_row + sales_gap
     sales_end_row = sales_title_row - 1
     taxable_sales_refs: list[str] = []
     exempt_invoice_refs: list[str] = []
-    for item_index in range(0, len(sales_items), slots_per_band):
-        title_row = sales_title_row + (item_index // slots_per_band) * rows_per_band
-        band_items = sales_items[item_index : item_index + slots_per_band]
+    for band_index, band_items in enumerate(sales_bands):
+        title_row = sales_title_row + band_index * rows_per_band
         band_total_row = _write_shared_month_band(
             sheet,
             title_row,
             band_items,
             months,
-            marker="③" if item_index == 0 else "",
-            first_title_in_month_column=item_index == 0,
+            marker="③" if band_index == 0 else "",
+            first_title_in_month_column=band_index == 0,
         )
         sales_end_row = max(sales_end_row, band_total_row)
         for slot, item in enumerate(band_items):
@@ -794,8 +833,8 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     card_items = [
         (display, key)
         for display, key in (
-            ("카드 합계\n(카과+카면+카영)", "카드매출"),
-            ("현영 합계\n(현과+현면+현영)", "현영매출"),
+            ("카드", "카드매출"),
+            ("현영", "현영매출"),
             ("제로페이", "제로페이"),
         )
         if _has_values(result.sales_summary, "item", key, fields=("total_amount",))
