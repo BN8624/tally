@@ -144,6 +144,13 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
         for cell in row
     )
     assert workbook["거래상세"].max_row == 6
+    assert workbook["거래상세"].max_column == 23
+    assert workbook["거래상세"]["B3"].value == "원본 시트"
+    assert workbook["거래상세"]["C3"].value == "원본 행"
+    assert workbook["거래상세"]["I3"].value == "카드사"
+    assert workbook["거래상세"]["J3"].value == "카드번호"
+    assert workbook["거래상세"]["B4"].value == "Sheet1"
+    assert workbook["거래상세"]["C4"].value == 2
     assert workbook["검산"]["A1"].value.startswith("검산 결과")
 
 
@@ -552,3 +559,139 @@ def test_export_includes_zero_rated_other_sales_and_optional_adjustments(tmp_pat
         for cell in row_cells
     ) == 2
     assert summary.print_area.endswith(f"$J${summary.max_row}")
+
+
+def test_export_handles_all_payment_purchase_types_and_multiple_invoice_accounts(
+    tmp_path,
+) -> None:
+    def row(
+        number: int,
+        division: str,
+        original_type: str,
+        supply: int,
+        tax: int,
+        *,
+        code: str = "",
+        account_name: str = "",
+    ) -> dict[str, object]:
+        return {
+            "row_id": f"Sheet1:{number}",
+            "sheet": "Sheet1",
+            "source_row": number,
+            "division": division,
+            "date": date(2026, 4, number),
+            "month": "2026-04",
+            "vendor": "거래처",
+            "item": "품목",
+            "supply_amount": Decimal(supply),
+            "tax_amount": Decimal(tax),
+            "total_amount": Decimal(supply + tax),
+            "original_type": original_type,
+            "account_code": code,
+            "account_name": account_name,
+            "card_company": "",
+            "card_number": "",
+        }
+
+    rows = [
+        row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
+        row(2, "매입", "카면", 500, 0),
+        row(3, "매입", "카영", 100, 0),
+        row(4, "매입", "현면", 200, 0),
+        row(5, "매입", "현영", 50, 0),
+        row(6, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
+        row(7, "매출", "과세", 3000, 300, code="206", account_name="차량운반구"),
+    ]
+    settings = CompanySettings(name="복합유형")
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "generic-layout.xlsx")
+    summary = load_workbook(output, data_only=False)["집계표"]
+
+    values = [
+        cell.value
+        for row_cells in summary.iter_rows()
+        for cell in row_cells
+        if cell.value is not None
+    ]
+    for label in ("카면", "카영", "현면", "현영"):
+        assert label in values
+    assert values.count("③  세금계산서 매출") == 1
+    assert "상품매출 · 세금계산서 매출" not in values
+    assert "차량운반구 · 세금계산서 매출" not in values
+
+    title = next(
+        cell
+        for row_cells in summary.iter_rows()
+        for cell in row_cells
+        if cell.value == "③  세금계산서 매출"
+    )
+    assert summary.cell(title.row, 5).value == "상품매출"
+    assert summary.cell(title.row, 6).value == "차량운반구"
+    assert summary.cell(title.row + 1, 3).value == 5000
+    assert summary.cell(title.row + 1, 5).value == 2000
+    assert summary.cell(title.row + 1, 6).value == 3000
+    assert summary.cell(title.row + 3, 3).value == f"=C{title.row + 2}"
+
+
+def test_export_keeps_payment_outside_three_wide_purchase_detail_tables(
+    tmp_path,
+) -> None:
+    def row(
+        number: int,
+        division: str,
+        original_type: str,
+        supply: int,
+        tax: int,
+        *,
+        vendor: str = "거래처",
+        code: str = "",
+        account_name: str = "",
+    ) -> dict[str, object]:
+        return {
+            "row_id": f"Sheet1:{number}",
+            "sheet": "Sheet1",
+            "source_row": number,
+            "division": division,
+            "date": date(2026, 4, number),
+            "month": "2026-04",
+            "vendor": vendor,
+            "item": "품목",
+            "supply_amount": Decimal(supply),
+            "tax_amount": Decimal(tax),
+            "total_amount": Decimal(supply + tax),
+            "original_type": original_type,
+            "account_code": code,
+            "account_name": account_name,
+            "card_company": "",
+            "card_number": "",
+        }
+
+    rows = [
+        row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
+        row(
+            2,
+            "매입",
+            "과세",
+            2000,
+            200,
+            vendor="케이티앤지",
+            code="146",
+            account_name="상품",
+        ),
+        row(3, "매입", "과세", 3000, 300, code="813", account_name="기타"),
+        row(4, "매입", "카면", 400, 0),
+        row(5, "매입", "면세", 500, 0),
+        row(6, "매입", "영세", 600, 0),
+        row(7, "매출", "과세", 7000, 700, code="401", account_name="상품매출"),
+    ]
+    settings = CompanySettings(name="넓은배치")
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "wide-detail-payment.xlsx")
+    summary = load_workbook(output, data_only=False)["집계표"]
+
+    assert summary["A7"].value == "②"
+    assert summary["B7"].value == "카면"
+    assert summary["E7"].value == "면세 매입"
+    assert summary["H7"].value == "영세 매입"
+    assert summary["L7"].value == "납부"
+    assert str(summary["M7"].value).startswith("=")

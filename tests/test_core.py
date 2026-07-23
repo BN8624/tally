@@ -138,3 +138,30 @@ def test_zero_pay_detection_allows_intermediate_card_brand_text() -> None:
 
     assert sales.loc["제로페이", "total_amount"] == Decimal(220)
     assert "카드매출" not in sales.index
+
+
+def test_purchase_exempt_payment_types_stay_visible_but_are_not_deducted() -> None:
+    data = pd.DataFrame(
+        [
+            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+            transaction("r2", "매입", "카과", "", "", 300, 30),
+            transaction("r3", "매입", "현과", "", "", 400, 40),
+            transaction("r4", "매입", "카면", "", "", 500, 0),
+            transaction("r5", "매입", "카영", "", "", 100, 0),
+            transaction("r6", "매입", "현면", "", "", 200, 0),
+            transaction("r7", "매입", "현영", "", "", 50, 0),
+        ]
+    )
+
+    result = process_transactions(data, CompanySettings(name="업체"))
+    summary = result.purchase_summary.set_index("item")
+
+    assert summary.loc["카드외", "supply_amount"] == Decimal(700)
+    assert summary.loc["차감계", "supply_amount"] == Decimal(1700)
+    assert summary.loc["카면", "supply_amount"] == Decimal(500)
+    assert summary.loc["카영", "supply_amount"] == Decimal(100)
+    assert summary.loc["현면", "supply_amount"] == Decimal(200)
+    assert summary.loc["현영", "supply_amount"] == Decimal(50)
+    assert "의제매입세액" not in summary.index
+    assert "공통" not in summary.index
+    assert result.validation_passed
