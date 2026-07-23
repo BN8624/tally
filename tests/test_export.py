@@ -100,26 +100,29 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary.row_dimensions[5].height == 25
     assert summary["J5"].border.bottom.style == "dotted"
     assert summary["J5"].border.top.style == "medium"
-    assert summary["H6"].value == "불공"
-    assert summary["I6"].value == 500
-    assert summary["J6"].value == 50
+    assert summary["H6"].value == "단수차이 조정"
+    assert summary["I6"].value == "=I5"
+    assert summary["J6"].value == "=ROUNDDOWN(I6*0.1,0)"
     assert summary.row_dimensions[6].height == 25
     assert summary["I6"].alignment.vertical == "bottom"
-    assert summary["H7"].value == "차감계"
-    assert summary["I7"].value == "=I5-I6"
-    assert summary["F8"].value == "납부"
-    assert summary["G8"].value == "=D19-J7"
-    assert summary["B11"].value == "불공"
-    assert summary["B12"].value == 1
-    assert summary["B19"].value == "카드외"
-    assert summary["C19"].value == "=ROUNDUP(G23/1.1,0)"
-    assert summary["D19"].value == "=G23-C19"
-    assert summary["B22"].value == "카드 합계\n(카과+카면+카영)"
-    assert summary["B23"].value == 2200
-    assert summary["B24"].value == "=SUM(B23:B23)"
-    assert summary["G22"].value == "카드"
-    assert summary["F23"].value == "과세"
-    assert summary["G23"].value == 2200
+    assert summary["H7"].value == "불공"
+    assert summary["I7"].value == 500
+    assert summary["J7"].value == 50
+    assert summary["H8"].value == "차감계"
+    assert summary["I8"].value == "=I6-I7"
+    assert summary["F9"].value == "납부"
+    assert summary["G9"].value == "=D20-J8"
+    assert summary["B12"].value == "불공"
+    assert summary["B13"].value == 1
+    assert summary["B20"].value == "카드외"
+    assert summary["C20"].value == "=ROUNDUP(G24/1.1,0)"
+    assert summary["D20"].value == "=G24-C20"
+    assert summary["B23"].value == "카드"
+    assert summary["B24"].value == 2200
+    assert summary["B25"].value == "=SUM(B24:B24)"
+    assert summary["G23"].value == "카드"
+    assert summary["F24"].value == "과세"
+    assert summary["G24"].value == 2200
     assert not any(
         cell.value
         in {"원재료(도급)", "제조경비", "도급경비", "고정", "현과", "면세"}
@@ -129,7 +132,7 @@ def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
     assert summary["A3"].fill.fill_type == "solid"
     assert summary["A3"].fill.fgColor.rgb.endswith("FFFFFF")
     assert summary["A3"].border.bottom.style == "dotted"
-    assert summary.print_area == "'집계표'!$A$1:$J$24"
+    assert summary.print_area == "'집계표'!$A$1:$J$25"
     assert summary.page_setup.orientation == "portrait"
     assert summary.page_setup.paperWidth == "170mm"
     assert summary.page_setup.paperHeight == "240mm"
@@ -188,31 +191,32 @@ def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> 
 
     summary = load_workbook(output, data_only=False)["집계표"]
     assert summary["H3"].value == "세금계산서 매입계"
-    assert summary["H6"].value == "카드외"
-    assert summary["I6"].value == 700
-    assert summary["H7"].value == "의제매입세액"
-    assert summary["I7"].value == 50
-    assert summary["H8"].value == "계"
-    assert summary["I8"].value == "=I5+I6+I7"
-    assert summary["H9"].value == "불공"
-    assert summary["I9"].value == 200
-    assert summary["H10"].value == "공통"
-    assert summary["I10"].value == 150
-    assert summary["H11"].value == "차감계"
-    assert summary["I11"].value == "=I8-I9-I10"
-    assert summary["A15"].value == "②"
-    assert summary["B15"].value == "카과"
-    assert summary["E15"].value == "현과"
-    assert summary["H15"].value == "의제매입세액"
-    assert summary["B16"].value == 1
-    assert summary["C16"].value == 300
-    assert summary["D16"].value == 30
-    assert summary["E16"].value == 1
-    assert summary["F16"].value == 400
-    assert summary["G16"].value == 40
-    assert summary["B19"].value == "불공"
-    assert summary["E19"].value == "공통"
-    assert summary["A27"].value == "③  상품매출 · 세금계산서 매출"
+    assert summary["H6"].value == "단수차이 조정"
+    assert summary["H7"].value == "카드외"
+    assert summary["I7"].value == 700
+    assert summary["H8"].value == "의제매입세액"
+    assert summary["I8"].value == 50
+    assert summary["H9"].value == "계"
+    assert summary["I9"].value == "=I6+I7+I8"
+    assert summary["H10"].value == "불공"
+    assert summary["I10"].value == 200
+    assert summary["H11"].value == "공통"
+    assert summary["I11"].value == 150
+    assert summary["H12"].value == "차감계"
+    assert summary["I12"].value == "=I9-I10-I11"
+    assert summary["A16"].value == "②"
+    assert summary["B16"].value == "카과"
+    assert summary["E16"].value == "현과"
+    assert summary["H16"].value == "의제매입세액"
+    assert summary["B17"].value == 1
+    assert summary["C17"].value == 300
+    assert summary["D17"].value == 30
+    assert summary["E17"].value == 1
+    assert summary["F17"].value == 400
+    assert summary["G17"].value == 40
+    assert summary["A24"].value == "③  상품매출 · 세금계산서 매출"
+    assert summary["E24"].value == "불공"
+    assert summary["H24"].value == "공통"
 
 
 def test_purchase_rounding_with_only_deduction_skips_intermediate_total(tmp_path) -> None:
@@ -370,55 +374,113 @@ def test_export_matches_tobacco_and_card_cash_sales_layout(tmp_path) -> None:
     assert summary["B4"].value == 1
     assert summary["E4"].value == 1
     assert summary["F4"].value == 2000
-    assert summary["K6"].value is None
+    assert summary["K6"].value == "단수차이 조정"
+    assert summary["L6"].value == "=L5"
+    assert summary["M6"].value == "=ROUNDDOWN(L6*0.1,0)"
 
-    assert summary["A11"].value == "③  상품매출 · 세금계산서 매출"
-    assert summary["B12"].value == 1
-    assert summary["C12"].value == 1000
-    assert summary["E11"].value == "면세 계산서 매출"
-    assert summary["E12"].value == 1
-    assert summary["F12"].value == 500
-    assert summary["B14"].value == "단수차이 조정"
-    assert summary["C14"].value == "=C13"
-    assert summary["D14"].value == "=ROUNDDOWN(C14*0.1,0)"
-    assert summary["B15"].value == "카드외"
-    assert summary["C15"].value == "=ROUNDUP(J20/1.1,0)"
-    assert summary["D15"].value == "=J20-C15"
-    assert summary["F15"].value == "=J21"
-    assert summary["B16"].value == "계"
+    assert summary["A12"].value == "③  상품매출 · 세금계산서 매출"
+    assert summary["B13"].value == 1
+    assert summary["C13"].value == 1000
+    assert summary["E12"].value == "면세 계산서 매출"
+    assert summary["E13"].value == 1
+    assert summary["F13"].value == 500
+    assert summary["B15"].value == "단수차이 조정"
+    assert summary["C15"].value == "=C14"
+    assert summary["D15"].value == "=ROUNDDOWN(C15*0.1,0)"
+    assert summary["B16"].value == "카드외"
+    assert summary["C16"].value == "=ROUNDUP(J21/1.1,0)"
+    assert summary["D16"].value == "=J21-C16"
+    assert summary["F16"].value == "=J22"
+    assert summary["B17"].value == "계"
 
-    assert summary["B19"].value == "카드 합계\n(카과+카면+카영)"
-    assert summary["C19"].value == "현영 합계\n(현과+현면+현영)"
-    assert summary["D19"].value == "제로페이"
-    assert summary["B20"].value == 1800
-    assert summary["C20"].value == 850
-    assert summary["D20"].value == 220
-    assert summary["B21"].value == "=SUM(B20:B20)"
+    assert summary["B20"].value == "카드"
+    assert summary["C20"].value == "현영"
+    assert summary["D20"].value == "제로페이"
+    assert summary["B21"].value == 1800
+    assert summary["C21"].value == 850
+    assert summary["D21"].value == 220
+    assert summary["B22"].value == "=SUM(B21:B21)"
 
-    assert summary["G19"].value == "카드"
-    assert summary["H19"].value == "현영"
-    assert summary["I19"].value == "제로페이"
-    assert summary["J19"].value == "계"
-    assert summary["F20"].value == "과세"
-    assert summary["G20"].value == 1100
-    assert summary["H20"].value == 550
-    assert summary["I20"].value == 220
-    assert summary["J20"].value == "=SUM(G20:I20)"
-    assert summary["F21"].value == "면세"
-    assert summary["G21"].value == 700
-    assert summary["H21"].value == 300
-    assert summary["I21"].value is None
+    assert summary["G20"].value == "카드"
+    assert summary["H20"].value == "현영"
+    assert summary["I20"].value == "제로페이"
+    assert summary["J20"].value == "계"
+    assert summary["F21"].value == "과세"
+    assert summary["G21"].value == 1100
+    assert summary["H21"].value == 550
+    assert summary["I21"].value == 220
     assert summary["J21"].value == "=SUM(G21:I21)"
-    assert summary["F22"].value == "계"
-    assert summary["G22"].value == "=SUM(G20:G21)"
-    assert summary["J22"].value == "=SUM(J20:J21)"
-    assert summary["G19"].font.name == "맑은 고딕"
-    assert summary["G19"].font.sz == 9
-    assert summary["G19"].font.bold
+    assert summary["F22"].value == "면세"
+    assert summary["G22"].value == 700
+    assert summary["H22"].value == 300
+    assert summary["I22"].value is None
+    assert summary["J22"].value == "=SUM(G22:I22)"
+    assert summary["F23"].value == "계"
+    assert summary["G23"].value == "=SUM(G21:G22)"
+    assert summary["J23"].value == "=SUM(J21:J22)"
     assert summary["G20"].font.name == "맑은 고딕"
     assert summary["G20"].font.sz == 9
-    assert summary["F22"].border.top.style == "medium"
-    assert summary.print_area == "'집계표'!$A$1:$M$22"
+    assert summary["G20"].font.bold
+    assert summary["G21"].font.name == "맑은 고딕"
+    assert summary["G21"].font.sz == 9
+    assert summary["F23"].border.top.style == "medium"
+    assert summary.print_area == "'집계표'!$A$1:$M$23"
+
+
+def test_export_uses_sample_layout_for_six_month_custom_category(tmp_path) -> None:
+    rows = []
+    row_number = 1
+    for month in range(1, 7):
+        for original_type, code, account_name, supply, tax in (
+            ("과세", "899", "운송경비", 100, 10),
+            ("과세", "813", "기타", 50, 5),
+            ("과세", "212", "차량운반구", 1000, 100),
+            ("카과", "", "", 200, 20),
+            ("현과", "", "", 100, 10),
+            ("과세", "401", "차량운반구", 5000, 500),
+        ):
+            division = "매출" if code == "401" else "매입"
+            rows.append(
+                {
+                    "row_id": f"Sheet1:{row_number}",
+                    "sheet": "Sheet1",
+                    "source_row": row_number,
+                    "division": division,
+                    "date": date(2026, month, 1),
+                    "month": f"2026-{month:02d}",
+                    "vendor": "거래처",
+                    "item": "품목",
+                    "supply_amount": Decimal(supply),
+                    "tax_amount": Decimal(tax),
+                    "total_amount": Decimal(supply + tax),
+                    "original_type": original_type,
+                    "account_code": code,
+                    "account_name": account_name,
+                    "card_company": "",
+                    "card_number": "",
+                }
+            )
+            row_number += 1
+
+    settings = CompanySettings(
+        name="화천택시",
+        fixed_asset_codes={"212"},
+        account_overrides={"899": "운송경비"},
+    )
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "six-month-layout.xlsx")
+    summary = load_workbook(output, data_only=False)["집계표"]
+
+    assert summary["B3"].value == "운송경비"
+    assert summary["E3"].value == "기타"
+    assert summary["H3"].value == "고정"
+    assert summary["K3"].value == "세금계산서 매입계"
+    assert summary["K11"].value == "단수차이 조정"
+    assert summary["A13"].value == "②"
+    assert summary["B13"].value == "카과"
+    assert summary["E13"].value == "현과"
+    assert summary["A24"].value == "③  차량운반구 · 세금계산서 매출"
+    assert summary.print_area == "'집계표'!$A$1:$M$32"
 
 
 def test_export_includes_zero_rated_other_sales_and_optional_adjustments(tmp_path) -> None:
