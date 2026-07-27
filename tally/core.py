@@ -38,16 +38,6 @@ SALES_KNOWN_TYPES = (
     | {"면세"}
     | SALES_OTHER_EXEMPT_TYPES
 )
-CATEGORY_ORDER = [
-    "상품",
-    "음식재료",
-    "담배",
-    "원재료(도급)",
-    "제조경비",
-    "도급경비",
-    "기타",
-    "고정",
-]
 
 
 @dataclass(slots=True)

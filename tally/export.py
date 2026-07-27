@@ -21,7 +21,6 @@ THIN_GRAY = Side(style="thin", color="B7B7B7")
 LEDGER_INK = "404040"
 LEDGER_RULE = Side(style="dotted", color="B7B7B7")
 LEDGER_TOTAL_RULE = Side(style="medium", color="666666")
-DETAIL_START_COLUMNS = (1, 5)
 SHARED_VALUE_START_COLUMNS = (2, 5, 8, 11)
 COUNT_FORMAT = '"("0")"'
 MONEY_FORMAT = "#,##0;[Red](#,##0);-"
@@ -132,114 +131,6 @@ def _style_ledger_cell(cell, *, bold: bool = False, total: bool = False) -> None
         top=LEDGER_TOTAL_RULE if total else None,
         bottom=LEDGER_RULE,
     )
-
-
-def _write_month_table(
-    sheet,
-    title_row: int,
-    start_column: int,
-    title: str,
-    frame: pd.DataFrame,
-    key_column: str,
-    key: str,
-    months: list[str],
-    *,
-    marker: str = "",
-    exempt: bool = False,
-    title_start_column: int | None = None,
-) -> int:
-    title_start = title_start_column or start_column
-    end_column = start_column + 3
-    sheet.merge_cells(
-        start_row=title_row,
-        start_column=title_start,
-        end_row=title_row,
-        end_column=end_column,
-    )
-    title_cell = sheet.cell(title_row, title_start, f"{marker}  {title}" if marker else title)
-    _style_ledger_cell(title_cell, bold=True)
-    title_cell.font = Font(name="맑은 고딕", size=10, bold=True, color=LEDGER_INK)
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    first_data_row = title_row + 1
-    fields: tuple[str | None, ...] = (
-        "count",
-        "supply_amount",
-        None if exempt else "tax_amount",
-    )
-    for month_index, month in enumerate(months):
-        row = first_data_row + month_index
-        month_cell = sheet.cell(row, start_column, _month_label(month, months))
-        _style_ledger_cell(month_cell)
-        month_cell.alignment = Alignment(horizontal="center", vertical="center")
-        for offset, field in enumerate(fields, start=1):
-            cell = sheet.cell(row, start_column + offset)
-            if field is not None:
-                cell.value = _lookup(frame, key_column, key, month, field)
-            _style_ledger_cell(cell)
-            cell.alignment = Alignment(horizontal="right", vertical="center")
-            cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
-
-    total_row = first_data_row + len(months)
-    total_label = sheet.cell(total_row, start_column, "계")
-    _style_ledger_cell(total_label, bold=True, total=True)
-    total_label.alignment = Alignment(horizontal="center", vertical="center")
-    for offset, field in enumerate(fields, start=1):
-        column = start_column + offset
-        cell = sheet.cell(total_row, column)
-        if field is not None:
-            letter = get_column_letter(column)
-            cell.value = f"=SUM({letter}{first_data_row}:{letter}{total_row - 1})" if months else 0
-        _style_ledger_cell(cell, bold=True, total=True)
-        cell.alignment = Alignment(horizontal="right", vertical="center")
-        cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
-    return total_row
-
-
-def _write_compact_month_table(
-    sheet,
-    title_row: int,
-    start_column: int,
-    title: str,
-    frame: pd.DataFrame,
-    key_column: str,
-    key: str,
-    months: list[str],
-) -> int:
-    sheet.merge_cells(
-        start_row=title_row,
-        start_column=start_column,
-        end_row=title_row,
-        end_column=start_column + 2,
-    )
-    title_cell = sheet.cell(title_row, start_column, title)
-    _style_ledger_cell(title_cell, bold=True)
-    title_cell.font = Font(name="맑은 고딕", size=10, bold=True, color=LEDGER_INK)
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    first_data_row = title_row + 1
-    fields = ("count", "supply_amount", "tax_amount")
-    for month_index, month in enumerate(months):
-        row = first_data_row + month_index
-        for offset, field in enumerate(fields):
-            cell = sheet.cell(row, start_column + offset, _lookup(frame, key_column, key, month, field))
-            _style_ledger_cell(cell)
-            cell.alignment = Alignment(horizontal="right", vertical="center")
-            cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
-
-    total_row = first_data_row + len(months)
-    for offset, field in enumerate(fields):
-        column = start_column + offset
-        letter = get_column_letter(column)
-        cell = sheet.cell(
-            total_row,
-            column,
-            f"=SUM({letter}{first_data_row}:{letter}{total_row - 1})" if months else 0,
-        )
-        _style_ledger_cell(cell, bold=True, total=True)
-        cell.alignment = Alignment(horizontal="right", vertical="center")
-        cell.number_format = COUNT_FORMAT if field == "count" else MONEY_FORMAT
-    return total_row
 
 
 def _write_total_amount_table(
