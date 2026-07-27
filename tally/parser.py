@@ -126,6 +126,10 @@ def _parse_amount(value: object, *, sheet: str, row: int, column: str) -> Decima
         ) from exc
 
 
+def _is_aggregate_label(text: str) -> bool:
+    return "계" in text.replace(" ", "")
+
+
 def _normalize_type(value: object) -> str:
     text = _clean_text(value)
     if "." in text:
@@ -193,10 +197,18 @@ def parse_workbook(source: str | Path | BinaryIO) -> pd.DataFrame:
         worksheet.iter_rows(min_row=header_row + 1, values_only=True),
         start=header_row + 1,
     ):
-        transaction_date = _parse_date(row[columns["전표일자"]])
-        if transaction_date is None:
-            continue
+        raw_date = row[columns["전표일자"]]
+        transaction_date = _parse_date(raw_date)
         division = _clean_text(row[columns["구분"]])
+        if transaction_date is None:
+            date_text = _clean_text(raw_date)
+            if date_text and division in {"매입", "매출"} and not _is_aggregate_label(date_text):
+                raise InputWorkbookError(
+                    f"전표일자 형식 오류. 시트={worksheet.title}, 행={source_row}, 값={raw_date!r}. "
+                    "상세 거래로 보이지만 날짜를 읽을 수 없어 임의로 건너뛰지 않았습니다. "
+                    "원본 전표일자 형식을 확인하세요."
+                )
+            continue
         if division not in {"매입", "매출"}:
             raise InputWorkbookError(
                 f"구분 값 오류. 시트={worksheet.title}, 행={source_row}, 값={division!r}. "

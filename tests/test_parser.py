@@ -63,6 +63,35 @@ def test_reports_missing_columns_with_sheet_and_recognized_columns() -> None:
     assert "전체매입매출" in message
 
 
+def test_rejects_detail_row_whose_date_cannot_be_read() -> None:
+    source = workbook_bytes(
+        [
+            ["매입", "2026-04-01", "상사", "재료", 1000, 100, 1100, "51.과세", "146", "상품", "", "", "", "", ""],
+            ["매입", "2026년 4월 2일", "상사", "재료", 9999, 999, 10998, "51.과세", "146", "상품", "", "", "", "", ""],
+        ]
+    )
+    with pytest.raises(InputWorkbookError, match="전표일자 형식 오류") as error:
+        parse_workbook(source)
+    assert "행=3" in str(error.value)
+
+
+def test_keeps_skipping_aggregate_and_title_rows() -> None:
+    source = workbook_bytes(
+        [
+            ["전체 매입매출장", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            ["매입", "2026-04-01", "상사", "재료", 1000, 100, 1100, "51.과세", "146", "상품", "", "", "", "", ""],
+            ["매입", "월       계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
+            ["매입", "누   계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
+            ["매입", "분기 누계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
+            ["매입", "합       계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
+            ["", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        ]
+    )
+    result = parse_workbook(source)
+    assert len(result) == 1
+    assert result.iloc[0]["supply_amount"] == 1000
+
+
 def test_rejects_malformed_amount_without_guessing() -> None:
     source = workbook_bytes(
         [["매입", "2026-04-01", "상사", "재료", "천원", 100, 1100, "51.과세", "146", "상품", "", "", "", "", ""]]
