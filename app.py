@@ -1,6 +1,7 @@
 # 업체 설정부터 불공 검토와 결과 저장까지 제공하는 로컬 데스크톱 앱입니다.
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 import tkinter as tk
@@ -16,6 +17,15 @@ from tally import (
     parse_workbook,
     process_transactions,
 )
+
+
+PROCESSING_ERRORS = (InputWorkbookError, OSError, ValueError, KeyError)
+
+
+def _error_text(exc: Exception) -> str:
+    if isinstance(exc, KeyError) and exc.args:
+        return str(exc.args[0])
+    return str(exc)
 
 
 class CompanyDialog(tk.Toplevel):
@@ -303,14 +313,23 @@ class TallyApp(tk.Tk):
         if not self.file_var.get():
             messagebox.showwarning("파일 선택", "전체 매입매출장 엑셀을 선택하세요.", parent=self)
             return
-        try:
+
+        def load() -> None:
             self.source_data = parse_workbook(self.file_var.get())
             self.decisions = {}
             self._recalculate()
-        except (InputWorkbookError, OSError, ValueError) as exc:
-            messagebox.showerror("처리 실패", str(exc), parent=self)
+
+        if not self._guarded("처리 실패", load):
             return
         self.notebook.select(self.review_tab if not self.result.review.empty else self.result_tab)
+
+    def _guarded(self, title: str, action: Callable[[], None]) -> bool:
+        try:
+            action()
+        except PROCESSING_ERRORS as exc:
+            messagebox.showerror(title, _error_text(exc), parent=self)
+            return False
+        return True
 
     def _recalculate(self) -> None:
         if self.source_data is None:
@@ -393,7 +412,7 @@ class TallyApp(tk.Tk):
         if row_id is None or payload is None:
             return
         self.decisions[row_id] = payload
-        self._recalculate()
+        self._guarded("판정 적용 실패", self._recalculate)
 
     def _apply_same_condition(self) -> None:
         row_id = self._selected_row_id()
@@ -413,7 +432,7 @@ class TallyApp(tk.Tk):
             return
         for matching_id in matching["row_id"]:
             self.decisions[matching_id] = dict(payload)
-        self._recalculate()
+        self._guarded("판정 일괄 적용 실패", self._recalculate)
 
     @staticmethod
     def _format_frame(frame: pd.DataFrame) -> str:
@@ -482,12 +501,28 @@ class TallyApp(tk.Tk):
         except ValueError as exc:
             messagebox.showerror("조정액 입력 오류", str(exc), parent=self)
             return
-        settings = replace(
-            self.store.get(self.company_var.get()),
-            prior_period_credit=prior_credit,
-            card_sales_deduction=card_deduction,
-        )
-        export_workbook(self.result, settings, path)
+
+        def save() -> None:
+            settings = replace(
+                self.store.get(self.company_var.get()),
+                prior_period_credit=prior_credit,
+                card_sales_deduction=card_deduction,
+            )
+            export_workbook(self.result, settings, path)
+
+        try:
+            save()
+        except PermissionError:
+            messagebox.showerror(
+                "저장 실패",
+                "결과 파일에 쓸 수 없습니다. 같은 이름의 엑셀이 열려 있으면 닫고 다시 저장하세요.\n"
+                f"{Path(path)}",
+                parent=self,
+            )
+            return
+        except PROCESSING_ERRORS as exc:
+            messagebox.showerror("저장 실패", _error_text(exc), parent=self)
+            return
         messagebox.showinfo("저장 완료", f"결과 엑셀을 저장했습니다.\n{Path(path)}", parent=self)
 
     @staticmethod
