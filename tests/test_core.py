@@ -129,6 +129,65 @@ def test_candidate_decision_can_be_applied_and_negative_transaction_counts_as_on
     assert result.validation_passed
 
 
+def test_unaggregated_type_fails_validation_instead_of_vanishing() -> None:
+    data = pd.DataFrame(
+        [
+            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+            transaction("r2", "매입", "수입", "146", "상품", 5000, 500),
+            transaction("r3", "매출", "영세", "401", "상품매출", 8000, 0),
+        ]
+    )
+    result = process_transactions(data, CompanySettings(name="업체"))
+    validation = result.validation.set_index("check")
+
+    assert validation.loc["미집계 유형 건수", "actual"] == 2
+    assert "수입" in validation.loc["미집계 유형 건수", "detail"]
+    assert "영세" in validation.loc["미집계 유형 건수", "detail"]
+    assert validation.loc["매입 집계 보존 공급가액", "expected"] == Decimal(6000)
+    assert validation.loc["매입 집계 보존 공급가액", "actual"] == Decimal(1000)
+    assert validation.loc["매출 집계 보존 건수", "expected"] == 1
+    assert validation.loc["매출 집계 보존 건수", "actual"] == 0
+    assert not result.validation_passed
+
+
+def test_empty_input_is_not_reported_as_verified() -> None:
+    columns = list(transaction("r1", "매입", "과세", "146", "상품", 0, 0))
+    result = process_transactions(pd.DataFrame([], columns=columns), CompanySettings(name="업체"))
+    validation = result.validation.set_index("check")
+
+    assert validation.loc["상세 거래 없음", "actual"] == 1
+    assert not result.validation_passed
+
+
+def test_every_sample_type_stays_inside_an_aggregate() -> None:
+    data = pd.DataFrame(
+        [
+            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+            transaction("r2", "매입", "불공", "813", "접대비", 200, 20),
+            transaction("r3", "매입", "카과", "", "", 300, 30),
+            transaction("r4", "매입", "현과", "", "", 400, 40),
+            transaction("r5", "매입", "카면", "", "", 500, 0),
+            transaction("r6", "매입", "면세", "", "", 600, 0),
+            transaction("r7", "매입", "영세", "", "", 700, 0),
+            transaction("r8", "매출", "과세", "401", "상품매출", 800, 80),
+            transaction("r9", "매출", "건별", "401", "상품매출", 900, 90),
+            transaction("r10", "매출", "카과", "401", "상품매출", 1000, 100),
+            transaction("r11", "매출", "현과", "401", "상품매출", 1100, 110),
+            transaction("r12", "매출", "면세", "401", "상품매출", 1200, 0),
+            transaction("r13", "매출", "카면", "401", "상품매출", 1300, 0),
+            transaction("r14", "매출", "현면", "401", "상품매출", 1400, 0),
+            transaction("r15", "매출", "면건", "401", "상품매출", 1500, 0),
+        ]
+    )
+    result = process_transactions(data, CompanySettings(name="업체"))
+    validation = result.validation.set_index("check")
+
+    assert validation.loc["미집계 유형 건수", "actual"] == 0
+    assert validation.loc["매입 집계 보존 건수", "actual"] == 7
+    assert validation.loc["매출 집계 보존 건수", "actual"] == 8
+    assert result.validation_passed
+
+
 def test_zero_pay_detection_allows_intermediate_card_brand_text() -> None:
     row = transaction("r1", "매출", "카과", "401", "상품매출", 200, 20)
     row["vendor"] = "제로(온누리)페이"

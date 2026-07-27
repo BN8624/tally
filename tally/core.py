@@ -21,6 +21,23 @@ SALES_CARD_TYPES = {"카과", "카면", "카영"}
 SALES_CARD_EXEMPT_TYPES = {"카면", "카영"}
 SALES_CASH_TYPES = {"현과", "현면", "현영"}
 SALES_CASH_EXEMPT_TYPES = {"현면", "현영"}
+PURCHASE_EXEMPT_PAYMENT_TYPES = {"카면", "카영", "현면", "현영"}
+PURCHASE_OTHER_TYPES = {"면세", "영세"}
+PURCHASE_KNOWN_TYPES = (
+    PURCHASE_TAX_TYPES
+    | PURCHASE_CARD_TYPES
+    | PURCHASE_DEEMED_TYPES
+    | PURCHASE_EXEMPT_PAYMENT_TYPES
+    | PURCHASE_OTHER_TYPES
+)
+SALES_OTHER_EXEMPT_TYPES = {"면건"}
+SALES_KNOWN_TYPES = (
+    SALES_TAX_TYPES
+    | SALES_CARD_TYPES
+    | SALES_CASH_TYPES
+    | {"면세"}
+    | SALES_OTHER_EXEMPT_TYPES
+)
 CATEGORY_ORDER = [
     "상품",
     "음식재료",
@@ -307,9 +324,84 @@ def process_transactions(
         )
     ].copy()
 
+    purchase_buckets = pd.concat(
+        [
+            purchase_known,
+            purchase_tax[purchase_tax["account_category"].eq("미분류")],
+            card_total,
+            deemed,
+            purchase[purchase["original_type"].isin(PURCHASE_EXEMPT_PAYMENT_TYPES)],
+            purchase[purchase["original_type"].isin(PURCHASE_OTHER_TYPES)],
+        ],
+        ignore_index=True,
+    )
+    sales_buckets = pd.concat(
+        [
+            taxable_sales,
+            invoice_exempt_sales,
+            card_exempt_sales,
+            cash_exempt_sales,
+            sales[sales["original_type"].isin(SALES_OTHER_EXEMPT_TYPES)],
+        ],
+        ignore_index=True,
+    )
+    purchase_unknown = purchase[~purchase["original_type"].isin(PURCHASE_KNOWN_TYPES)]
+    sales_unknown = sales[~sales["original_type"].isin(SALES_KNOWN_TYPES)]
+    unknown_types = sorted(
+        set(purchase_unknown["original_type"]) | set(sales_unknown["original_type"])
+    )
+
     rows = [
         _validation_row("상세 거래 건수", len(transactions), len(data)),
         _validation_row("중복 거래", 0, int(data["row_id"].duplicated().sum())),
+        _validation_row(
+            "상세 거래 없음",
+            0,
+            int(data.empty),
+            detail="상세 거래가 한 건도 없으면 검산을 완료로 표시하지 않습니다.",
+        ),
+        _validation_row(
+            "미집계 유형 건수",
+            0,
+            len(purchase_unknown) + len(sales_unknown),
+            detail=(
+                f"어느 집계에도 들어가지 않는 유형: {', '.join(unknown_types)}"
+                if unknown_types
+                else "매입·매출 유형이 모두 집계 대상입니다."
+            ),
+        ),
+        _validation_row(
+            "매입 집계 보존 건수",
+            len(purchase),
+            len(purchase_buckets),
+            detail="매입 상세 거래가 빠짐없이 집계 대상에 들어가는지 확인합니다.",
+        ),
+        _validation_row(
+            "매입 집계 보존 공급가액",
+            _numeric_total(purchase, "supply_amount"),
+            _numeric_total(purchase_buckets, "supply_amount"),
+        ),
+        _validation_row(
+            "매입 집계 보존 세액",
+            _numeric_total(purchase, "tax_amount"),
+            _numeric_total(purchase_buckets, "tax_amount"),
+        ),
+        _validation_row(
+            "매출 집계 보존 건수",
+            len(sales),
+            len(sales_buckets),
+            detail="매출 상세 거래가 빠짐없이 집계 대상에 들어가는지 확인합니다.",
+        ),
+        _validation_row(
+            "매출 집계 보존 공급가액",
+            _numeric_total(sales, "supply_amount"),
+            _numeric_total(sales_buckets, "supply_amount"),
+        ),
+        _validation_row(
+            "매출 집계 보존 세액",
+            _numeric_total(sales, "tax_amount"),
+            _numeric_total(sales_buckets, "tax_amount"),
+        ),
         _validation_row("공급가액 합계", _numeric_total(transactions, "supply_amount"), _numeric_total(data, "supply_amount")),
         _validation_row("세액 합계", _numeric_total(transactions, "tax_amount"), _numeric_total(data, "tax_amount")),
         _validation_row("합계금액 합계", _numeric_total(transactions, "total_amount"), _numeric_total(data, "total_amount")),
