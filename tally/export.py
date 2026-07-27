@@ -25,6 +25,17 @@ SHARED_VALUE_START_COLUMNS = (2, 5, 8, 11)
 COUNT_FORMAT = '"("0")"'
 MONEY_FORMAT = "#,##0;[Red](#,##0);-"
 LEDGER_ROW_HEIGHT = 25
+TABLE_MONEY_FORMAT = "#,##0;[Red]-#,##0"
+TABLE_DATE_FORMAT = "yyyy-mm-dd"
+TABLE_WRAP_FIELDS = {"item", "candidate_reason", "nondeductible_reason", "review_memo", "detail"}
+TABLE_MONEY_FIELDS = {"supply_amount", "tax_amount", "total_amount", "expected", "actual", "difference"}
+TABLE_WIDE_FIELDS = {"vendor", "item", "candidate_reason", "nondeductible_reason", "review_memo", "detail"}
+TABLE_ALERT_VALUES = {"실패", "판단 보류", "미분류"}
+TABLE_BORDER = Border(bottom=THIN_GRAY)
+TABLE_WRAP_ALIGNMENT = Alignment(vertical="top", wrap_text=True)
+TABLE_PLAIN_ALIGNMENT = Alignment(vertical="top", wrap_text=False)
+TABLE_ALERT_FILL = PatternFill("solid", fgColor=RED)
+WHITE_FILL = PatternFill("solid", fgColor=WHITE)
 
 
 def _excel_value(value: object) -> object:
@@ -124,7 +135,7 @@ def _total_value(frame: pd.DataFrame, key_column: str, key: str, field: str) -> 
 
 
 def _style_ledger_cell(cell, *, bold: bool = False, total: bool = False) -> None:
-    cell.fill = PatternFill("solid", fgColor=WHITE)
+    cell.fill = WHITE_FILL
     cell.font = Font(name="맑은 고딕", size=9, bold=bold, color=LEDGER_INK)
     cell.alignment = Alignment(vertical="center")
     cell.border = Border(
@@ -955,7 +966,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         max_col=summary_end_column,
     ):
         for cell in row_cells:
-            cell.fill = PatternFill("solid", fgColor=WHITE)
+            cell.fill = WHITE_FILL
 
     for row_number in range(3, row + 1):
         has_content = any(
@@ -1006,26 +1017,35 @@ def _write_table_sheet(
         cell.fill = PatternFill("solid", fgColor=NAVY)
         cell.font = Font(name="맑은 고딕", bold=True, color=WHITE)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    column_styles = [
+        (
+            column,
+            field,
+            TABLE_WRAP_ALIGNMENT if field in TABLE_WRAP_FIELDS else TABLE_PLAIN_ALIGNMENT,
+            TABLE_MONEY_FORMAT if field in TABLE_MONEY_FIELDS else "",
+        )
+        for column, (field, _) in enumerate(headers, start=1)
+    ]
     for row_number, (_, record) in enumerate(frame.iterrows(), start=4):
-        for column, (field, _) in enumerate(headers, start=1):
+        for column, field, alignment, number_format in column_styles:
             value = _excel_value(record.get(field, ""))
             cell = sheet.cell(row_number, column, value)
-            cell.border = Border(bottom=THIN_GRAY)
-            cell.alignment = Alignment(vertical="top", wrap_text=field in {"item", "candidate_reason", "nondeductible_reason", "review_memo", "detail"})
-            if field in {"supply_amount", "tax_amount", "total_amount", "expected", "actual", "difference"}:
-                cell.number_format = "#,##0;[Red]-#,##0"
-            if field == "date" and isinstance(value, (date, datetime)):
-                cell.number_format = "yyyy-mm-dd"
-        if alert_column and str(record.get(alert_column, "")) in {"실패", "판단 보류", "미분류"}:
+            cell.border = TABLE_BORDER
+            cell.alignment = alignment
+            if number_format:
+                cell.number_format = number_format
+            elif field == "date" and isinstance(value, (date, datetime)):
+                cell.number_format = TABLE_DATE_FORMAT
+        if alert_column and str(record.get(alert_column, "")) in TABLE_ALERT_VALUES:
             for cell in sheet[row_number]:
-                cell.fill = PatternFill("solid", fgColor=RED)
+                cell.fill = TABLE_ALERT_FILL
 
     sheet.freeze_panes = "A4"
     sheet.auto_filter.ref = f"A3:{get_column_letter(len(headers))}{max(3, 3 + len(frame))}"
     sheet.sheet_view.showGridLines = False
     for index, (field, label) in enumerate(headers, start=1):
         width = max(12, min(42, len(label) * 2 + 4))
-        if field in {"vendor", "item", "candidate_reason", "nondeductible_reason", "review_memo", "detail"}:
+        if field in TABLE_WIDE_FIELDS:
             width = 28 if field in {"vendor", "item"} else 36
         sheet.column_dimensions[get_column_letter(index)].width = width
 
