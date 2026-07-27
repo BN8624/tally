@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
 from tally.core import classify_purchase_account, process_transactions
 from tally.settings import CompanySettings
@@ -186,6 +187,52 @@ def test_every_sample_type_stays_inside_an_aggregate() -> None:
     assert validation.loc["매입 집계 보존 건수", "actual"] == 7
     assert validation.loc["매출 집계 보존 건수", "actual"] == 8
     assert result.validation_passed
+
+
+def test_information_rows_show_totals_without_deciding_validation() -> None:
+    data = pd.DataFrame(
+        [
+            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+            transaction("r2", "매출", "과세", "401", "상품매출", 2000, 200),
+        ]
+    )
+    result = process_transactions(data, CompanySettings(name="업체"))
+    validation = result.validation.set_index("check")
+
+    assert validation.loc["상세 거래 건수", "status"] == "정보"
+    assert validation.loc["상세 거래 건수", "actual"] == 2
+    assert validation.loc["공급가액 합계", "actual"] == Decimal(3000)
+    assert validation.loc["2026-04 합계금액", "status"] == "정보"
+    assert set(result.validation["status"]) == {"통과", "정보"}
+    assert result.validation_passed
+
+
+def test_checks_that_could_never_fail_are_gone() -> None:
+    data = pd.DataFrame([transaction("r1", "매입", "과세", "146", "상품", 1000, 100)])
+    checks = set(process_transactions(data, CompanySettings(name="업체")).validation["check"])
+
+    assert checks.isdisjoint(
+        {
+            "중복 거래",
+            "세금계산서 매입계 관계",
+            "카드매입 관계",
+            "과세 매입 총계 관계",
+            "과세매출 공급가액",
+            "카드매출 보조표",
+            "현영매출 보조표",
+        }
+    )
+
+
+def test_duplicated_row_id_stops_processing_outright() -> None:
+    data = pd.DataFrame(
+        [
+            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+        ]
+    )
+    with pytest.raises(ValueError, match="row_id가 중복"):
+        process_transactions(data, CompanySettings(name="업체"))
 
 
 def test_zero_pay_detection_allows_intermediate_card_brand_text() -> None:

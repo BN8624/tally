@@ -182,6 +182,17 @@ def _validation_row(check: str, expected: object, actual: object, *, detail: str
     }
 
 
+def _information_row(check: str, value: object, *, detail: str = "") -> dict[str, object]:
+    return {
+        "check": check,
+        "status": "정보",
+        "expected": "",
+        "actual": value,
+        "difference": "",
+        "detail": detail,
+    }
+
+
 def process_transactions(
     transactions: pd.DataFrame,
     settings: CompanySettings,
@@ -342,8 +353,7 @@ def process_transactions(
     )
 
     rows = [
-        _validation_row("상세 거래 건수", len(transactions), len(data)),
-        _validation_row("중복 거래", 0, int(data["row_id"].duplicated().sum())),
+        _information_row("상세 거래 건수", len(data)),
         _validation_row(
             "상세 거래 없음",
             0,
@@ -392,9 +402,6 @@ def process_transactions(
             _numeric_total(sales, "tax_amount"),
             _numeric_total(sales_buckets, "tax_amount"),
         ),
-        _validation_row("공급가액 합계", _numeric_total(transactions, "supply_amount"), _numeric_total(data, "supply_amount")),
-        _validation_row("세액 합계", _numeric_total(transactions, "tax_amount"), _numeric_total(data, "tax_amount")),
-        _validation_row("합계금액 합계", _numeric_total(transactions, "total_amount"), _numeric_total(data, "total_amount")),
         _validation_row("과세·불공·공통 계정분류 건수", len(purchase_tax), len(purchase_known)),
         _validation_row(
             "과세·불공·공통 계정분류 공급가액",
@@ -408,24 +415,6 @@ def process_transactions(
             _numeric_total(purchase_known, "tax_amount"),
         ),
         _validation_row(
-            "세금계산서 매입계 관계",
-            _numeric_total(general, "total_amount") + _numeric_total(fixed, "total_amount"),
-            _numeric_total(purchase_known, "total_amount"),
-            detail="일반매입 + 고정",
-        ),
-        _validation_row(
-            "카드매입 관계",
-            _numeric_total(card_tax, "total_amount") + _numeric_total(cash_tax, "total_amount"),
-            _numeric_total(card_total, "total_amount"),
-            detail="카과 + 현과",
-        ),
-        _validation_row(
-            "과세 매입 총계 관계",
-            _numeric_total(purchase_known, "total_amount") + _numeric_total(other_deductible, "total_amount"),
-            _numeric_total(taxable_purchase, "total_amount"),
-            detail="세금계산서 매입계 + 카드외 + 의제매입세액",
-        ),
-        _validation_row(
             "과매계 관계",
             _numeric_total(taxable_purchase, "total_amount")
             - _numeric_total(nondeductible, "total_amount")
@@ -436,36 +425,16 @@ def process_transactions(
             ),
             detail="매입세액 합계 - 최종 불공 - 공통",
         ),
-        _validation_row(
-            "과세매출 공급가액",
-            _numeric_total(sales[sales["original_type"].isin(SALES_TAX_TYPES)], "supply_amount"),
-            _numeric_total(taxable_sales, "supply_amount"),
-        ),
-        _validation_row(
-            "카드매출 보조표",
-            _numeric_total(sales[sales["original_type"].isin(SALES_CARD_TYPES)], "total_amount"),
-            _numeric_total(
-                sales_summary[sales_summary["item"].eq("카드매출")], "total_amount"
-            )
-            + _numeric_total(
-                sales_summary[sales_summary["item"].eq("제로페이")], "total_amount"
-            ),
-        ),
-        _validation_row(
-            "현영매출 보조표",
-            _numeric_total(sales[sales["original_type"].isin(SALES_CASH_TYPES)], "total_amount"),
-            _numeric_total(
-                sales_summary[sales_summary["item"].eq("현영매출")], "total_amount"
-            ),
-        ),
         _validation_row("미분류 건수", 0, int(purchase_tax["account_category"].eq("미분류").sum())),
         _validation_row("불공 판단 보류 건수", 0, int(review["review_status"].eq("판단 보류").sum())),
+        _information_row("공급가액 합계", _numeric_total(data, "supply_amount")),
+        _information_row("세액 합계", _numeric_total(data, "tax_amount")),
+        _information_row("합계금액 합계", _numeric_total(data, "total_amount")),
     ]
     for month, source_month in data.groupby("month", sort=True):
         rows.append(
-            _validation_row(
-                f"{month} 월별 합계금액",
-                _numeric_total(transactions[transactions["month"].eq(month)], "total_amount"),
+            _information_row(
+                f"{month} 합계금액",
                 _numeric_total(source_month, "total_amount"),
             )
         )
@@ -478,5 +447,7 @@ def process_transactions(
         sales_by_account=sales_by_account,
         sales_summary=sales_summary,
         validation=validation,
-        validation_passed=bool(validation["status"].eq("통과").all()),
+        validation_passed=bool(
+            validation.loc[validation["status"].ne("정보"), "status"].eq("통과").all()
+        ),
     )
