@@ -5,6 +5,8 @@ build/
 dist/
 data/
 outputs/
+.codex-work/
+samples/
 *.egg-info/
 *.xlsx
 !tests/fixtures/*.xlsx
