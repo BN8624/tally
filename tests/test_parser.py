@@ -1,5 +1,7 @@
 # 입력 엑셀 파서의 상세행 판정과 오류 처리를 검증합니다.
 from io import BytesIO
+import re
+import zipfile
 
 from openpyxl import Workbook
 import pytest
@@ -37,6 +39,35 @@ def workbook_bytes(rows: list[list[object]], headers: list[str] | None = None) -
     workbook.save(output)
     output.seek(0)
     return output
+
+
+def with_sheet_dimension(source: BytesIO, dimension: str | None) -> BytesIO:
+    original = zipfile.ZipFile(source)
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as rewritten:
+        for item in original.infolist():
+            data = original.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                replacement = "" if dimension is None else f'<dimension ref="{dimension}"/>'
+                data = re.sub(r"<dimension [^>]*/>", replacement, data.decode("utf-8")).encode("utf-8")
+            rewritten.writestr(item, data)
+    output.seek(0)
+    return output
+
+
+@pytest.mark.parametrize("dimension", [None, "A1"])
+def test_reads_rows_when_sheet_dimension_is_missing_or_wrong(dimension: str | None) -> None:
+    source = workbook_bytes(
+        [
+            ["매입", "2026-04-01", "상사", "재료", 1000, 100, 1100, "51.과세", "146", "상품"],
+            [],
+            ["매출", "2026-04-02", "고객", "매출", 500, 50, 550, "17.카과", "401", "상품매출", "", "", "", "국민", "9999"],
+        ]
+    )
+    result = parse_workbook(with_sheet_dimension(source, dimension))
+    assert result["source_row"].tolist() == [2, 4]
+    assert result["card_number"].tolist() == ["", "9999"]
+    assert result.iloc[0]["supply_amount"] == 1000
 
 
 def test_extracts_only_real_date_rows_and_uses_account_code_next_to_account_name() -> None:

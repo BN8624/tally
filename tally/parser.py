@@ -163,8 +163,10 @@ def _find_header(workbook) -> tuple[object, int, dict[str, int]]:
     best_sheet = "알 수 없음"
     best_recognized: list[str] = []
     for worksheet in workbook.worksheets:
+        # 내보낸 파일의 시트 크기 정보가 없거나 틀려도 실제 셀을 기준으로 읽습니다.
+        worksheet.reset_dimensions()
         for row_number, row in enumerate(
-            worksheet.iter_rows(min_row=1, max_row=min(30, worksheet.max_row), values_only=True),
+            worksheet.iter_rows(min_row=1, max_row=30, values_only=True),
             start=1,
         ):
             mapping, recognized = _column_map(row)
@@ -194,7 +196,7 @@ def parse_workbook(source: str | Path | BinaryIO) -> pd.DataFrame:
     worksheet, header_row, columns = _find_header(workbook)
     transactions: list[dict[str, object]] = []
     for source_row, row in enumerate(
-        worksheet.iter_rows(min_row=header_row + 1, values_only=True),
+        worksheet.iter_rows(min_row=header_row + 1, max_col=max(columns.values()) + 1, values_only=True),
         start=header_row + 1,
     ):
         raw_date = row[columns["전표일자"]]
