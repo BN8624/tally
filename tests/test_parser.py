@@ -106,6 +106,26 @@ def test_rejects_detail_row_whose_date_cannot_be_read() -> None:
     assert "행=3" in str(error.value)
 
 
+@pytest.mark.parametrize(
+    ("detail", "message"),
+    [
+        (["매입", None, "상사", "재료", 9999, 999, 10998, "51.과세", "146", "상품"], "전표일자 누락"),
+        (["", "2026-13-40", "상사", "재료", 9999, 999, 10998, "51.과세", "146", "상품"], "전표일자 형식 오류"),
+        (["", None, "상사", "재료", 9999, 999, 10998], "전표일자 누락"),
+    ],
+)
+def test_rejects_detail_row_without_readable_date(detail: list[object], message: str) -> None:
+    source = workbook_bytes(
+        [
+            ["매입", "2026-04-01", "상사", "재료", 1000, 100, 1100, "51.과세", "146", "상품"],
+            detail,
+        ]
+    )
+    with pytest.raises(InputWorkbookError, match=message) as error:
+        parse_workbook(source)
+    assert "행=3" in str(error.value)
+
+
 def test_keeps_skipping_aggregate_and_title_rows() -> None:
     source = workbook_bytes(
         [
@@ -115,12 +135,36 @@ def test_keeps_skipping_aggregate_and_title_rows() -> None:
             ["매입", "누   계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
             ["매입", "분기 누계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
             ["매입", "합       계", "", "1건", 1000, 100, 1100, "", "", "", "", "", "", "", ""],
+            ["매입", None, "", "1건", 1000, 100, 1100],
+            ["", None, "[ 4월 합계 ]", "", 1000, 100, 1100],
+            ["", None, "", "", 1000, 100, 1100],
+            HEADERS,
+            ["출력일 2026-07-01", None],
             ["", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
         ]
     )
     result = parse_workbook(source)
     assert len(result) == 1
     assert result.iloc[0]["supply_amount"] == 1000
+
+
+def test_stops_when_more_than_one_sheet_has_a_ledger_header() -> None:
+    workbook = Workbook()
+    first = workbook.active
+    first.title = "상반기"
+    second = workbook.create_sheet("하반기")
+    for sheet in (first, second):
+        sheet.append(HEADERS)
+        sheet.append(["매입", "2026-04-01", "상사", "재료", 1000, 100, 1100, "51.과세", "146", "상품"])
+    workbook.create_sheet("메모").append(["참고"])
+    source = BytesIO()
+    workbook.save(source)
+    source.seek(0)
+
+    with pytest.raises(InputWorkbookError, match="원장 시트가 여러 개") as error:
+        parse_workbook(source)
+    assert "상반기" in str(error.value)
+    assert "하반기" in str(error.value)
 
 
 def test_rejects_malformed_amount_without_guessing() -> None:

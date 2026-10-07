@@ -44,6 +44,8 @@ HEADER_ALIASES = {
     "카드번호": {"카드번호"},
 }
 
+AGGREGATE_CAPTION_ENDINGS = ("월계", "누계", "합계", "총계", "소계")
+
 OUTPUT_COLUMNS = (
     "row_id",
     "sheet",
@@ -130,6 +132,30 @@ def _is_aggregate_label(text: str) -> bool:
     return "계" in text.replace(" ", "")
 
 
+def _is_aggregate_caption(value: object) -> bool:
+    text = re.sub(r"[\W_]+", "", _clean_text(value))
+    return (
+        text == "계"
+        or (len(text) <= 8 and text.endswith(AGGREGATE_CAPTION_ENDINGS))
+        or re.fullmatch(r"\d+건", text) is not None
+    )
+
+
+def _looks_like_detail(row: tuple[object, ...], columns: dict[str, int]) -> bool:
+    if any(_is_aggregate_caption(row[columns[column]]) for column in ("구분", "거래처", "품명")):
+        return False
+    mapping, _ = _column_map(row)
+    if all(column in mapping for column in REQUIRED_COLUMNS):
+        return False
+    if _clean_text(row[columns["구분"]]) in {"매입", "매출"}:
+        return True
+    if any(_clean_text(row[columns[column]]) for column in ("매입/매출 유형", "계정코드", "계정과목")):
+        return True
+    has_party = any(_clean_text(row[columns[column]]) for column in ("거래처", "품명"))
+    has_amount = any(_clean_text(row[columns[column]]) for column in ("공급가액", "부가세", "합계"))
+    return has_party and has_amount
+
+
 def _normalize_type(value: object) -> str:
     text = _clean_text(value)
     if "." in text:
@@ -162,6 +188,7 @@ def _column_map(headers: tuple[object, ...]) -> tuple[dict[str, int], list[str]]
 def _find_header(workbook) -> tuple[object, int, dict[str, int]]:
     best_sheet = "알 수 없음"
     best_recognized: list[str] = []
+    ledgers: list[tuple[object, int, dict[str, int]]] = []
     for worksheet in workbook.worksheets:
         # 내보낸 파일의 시트 크기 정보가 없거나 틀려도 실제 셀을 기준으로 읽습니다.
         worksheet.reset_dimensions()
@@ -174,7 +201,18 @@ def _find_header(workbook) -> tuple[object, int, dict[str, int]]:
                 best_sheet = worksheet.title
                 best_recognized = recognized
             if all(column in mapping for column in REQUIRED_COLUMNS):
-                return worksheet, row_number, mapping
+                ledgers.append((worksheet, row_number, mapping))
+                break
+
+    if len(ledgers) > 1:
+        raise InputWorkbookError(
+            "필수 열이 모두 있는 원장 시트가 여러 개입니다. "
+            f"시트={', '.join(worksheet.title for worksheet, _, _ in ledgers)}. "
+            "여러 원장 시트를 합치는 처리는 아직 검증되지 않아 한 시트만 처리하지 않고 중단했습니다. "
+            "원장 시트가 하나인 파일로 다시 내보내세요."
+        )
+    if ledgers:
+        return ledgers[0]
 
     missing = [column for column in REQUIRED_COLUMNS if column not in best_recognized]
     raise InputWorkbookError(
@@ -204,13 +242,19 @@ def parse_workbook(source: str | Path | BinaryIO) -> pd.DataFrame:
         division = _clean_text(row[columns["구분"]])
         if transaction_date is None:
             date_text = _clean_text(raw_date)
-            if date_text and division in {"매입", "매출"} and not _is_aggregate_label(date_text):
+            if _is_aggregate_label(date_text) or not _looks_like_detail(row, columns):
+                continue
+            if not date_text:
                 raise InputWorkbookError(
-                    f"전표일자 형식 오류. 시트={worksheet.title}, 행={source_row}, 값={raw_date!r}. "
-                    "상세 거래로 보이지만 날짜를 읽을 수 없어 임의로 건너뛰지 않았습니다. "
-                    "원본 전표일자 형식을 확인하세요."
+                    f"전표일자 누락. 시트={worksheet.title}, 행={source_row}. "
+                    "구분·유형·거래처·금액 등 상세 거래 정보가 있지만 전표일자가 비어 있어 "
+                    "임의로 건너뛰지 않았습니다. 원본 전표일자를 확인하세요."
                 )
-            continue
+            raise InputWorkbookError(
+                f"전표일자 형식 오류. 시트={worksheet.title}, 행={source_row}, 값={raw_date!r}. "
+                "상세 거래로 보이지만 날짜를 읽을 수 없어 임의로 건너뛰지 않았습니다. "
+                "원본 전표일자 형식을 확인하세요."
+            )
         if division not in {"매입", "매출"}:
             raise InputWorkbookError(
                 f"구분 값 오류. 시트={worksheet.title}, 행={source_row}, 값={division!r}. "
