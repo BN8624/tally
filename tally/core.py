@@ -213,8 +213,10 @@ def process_transactions(
         category = ""
         if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
             category = classify_purchase_account(row["account_code"], settings)
-            if category == settings.account_146_label and _matches_keyword(
-                row["vendor"], settings.tobacco_vendor_keywords
+            if (
+                category == settings.account_146_label
+                and str(row["account_code"]).strip() not in settings.account_overrides
+                and _matches_keyword(row["vendor"], settings.tobacco_vendor_keywords)
             ):
                 category = "담배"
         candidate = find_nondeductible_candidate(row, settings)

@@ -59,6 +59,23 @@ def test_account_classification_uses_only_canon_rules_and_company_priority() -> 
     assert classify_purchase_account("499", settings) == "미분류"
 
 
+def test_explicit_account_override_is_not_replaced_by_tobacco_rule() -> None:
+    rows = [
+        transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
+        transaction("r2", "매입", "과세", "813", "소모품", 500, 50),
+    ]
+    for row in rows:
+        row["vendor"] = "KT&G"
+    overridden = process_transactions(
+        pd.DataFrame(rows),
+        CompanySettings(name="업체", account_overrides={"146": "상품", "813": "상품"}),
+    )
+    default = process_transactions(pd.DataFrame(rows), CompanySettings(name="업체"))
+
+    assert overridden.transactions["account_category"].tolist() == ["상품", "상품"]
+    assert default.transactions["account_category"].tolist() == ["담배", "기타"]
+
+
 def test_processing_keeps_nondeductible_in_tax_aggregate_then_subtracts_it() -> None:
     data = pd.DataFrame(
         [
