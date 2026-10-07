@@ -9,5 +9,4 @@ outputs/
 samples/
 *.egg-info/
 *.xlsx
-!tests/fixtures/*.xlsx
 
