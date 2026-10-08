@@ -48,6 +48,11 @@ def _excel_value(value: object) -> object:
     return value
 
 
+def _keep_text(cell) -> None:
+    if isinstance(cell.value, str) and cell.value.startswith("="):
+        cell.data_type = "s"
+
+
 def _period_label(months: list[str]) -> str:
     if not months:
         return "집계 기간 없음"
@@ -87,6 +92,7 @@ def _set_summary_heading(
             end_column=end_column,
         )
         cell = sheet.cell(1, start_column, text)
+        _keep_text(cell)
         cell.font = Font(name="맑은 고딕", size=size, bold=True, color=LEDGER_INK)
         cell.alignment = Alignment(horizontal=alignment, vertical="center")
 
@@ -225,6 +231,7 @@ def _write_sales_account_columns(
     for offset, account in enumerate(accounts):
         column = start_column + offset
         title_cell = sheet.cell(title_row, column, _sales_account_display(account))
+        _keep_text(title_cell)
         _style_ledger_cell(title_cell, bold=True)
         title_cell.alignment = Alignment(
             horizontal="center",
@@ -286,6 +293,7 @@ def _write_shared_month_band(
             end_column=title_end,
         )
         title_cell = sheet.cell(title_row, title_start, title_text)
+        _keep_text(title_cell)
         _style_ledger_cell(title_cell, bold=True)
         title_cell.font = Font(name="맑은 고딕", size=10, bold=True, color=LEDGER_INK)
         title_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -458,6 +466,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
 
     purchase_deductible_tax_ref: str | None = None
     invoice_total_row: int | None = None
+    invoice_slot: int | None = None
     has_fixed_purchase = _has_values(result.purchase_summary, "item", "고정")
     if invoice_present:
         purchase_items.append(
@@ -477,19 +486,30 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
                 marker="①" if item_index == 0 else "",
             )
         )
-    purchase_end_row = max(purchase_total_rows, default=1)
+    purchase_end_row = max(purchase_total_rows, default=purchase_title_row - 1)
 
+    other_purchase_keys = [
+        key for key in ("카드외", "의제매입세액") if _has_values(result.purchase_summary, "item", key)
+    ]
+    summary_count_column: int | None = None
     if invoice_present:
         invoice_index = len(purchase_items) - 1
         invoice_slot = invoice_index % slots_per_band
         invoice_total_row = purchase_total_rows[invoice_index // slots_per_band]
-        invoice_count_column = SHARED_VALUE_START_COLUMNS[invoice_slot]
-        invoice_supply_column = invoice_count_column + 1
-        invoice_tax_column = invoice_count_column + 2
-        invoice_supply_ref = f"{get_column_letter(invoice_supply_column)}{invoice_total_row}"
-        invoice_tax_ref = f"{get_column_letter(invoice_tax_column)}{invoice_total_row}"
-        supply_letter = get_column_letter(invoice_supply_column)
-        tax_letter = get_column_letter(invoice_tax_column)
+        summary_count_column = SHARED_VALUE_START_COLUMNS[invoice_slot]
+        summary_row = invoice_total_row + 1
+    elif other_purchase_keys:
+        summary_count_column = SHARED_VALUE_START_COLUMNS[0]
+        summary_row = purchase_title_row
+        marker_cell = sheet.cell(summary_row, 1, "①")
+        _style_ledger_cell(marker_cell, bold=True)
+        marker_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    if summary_count_column is not None:
+        summary_supply_column = summary_count_column + 1
+        summary_tax_column = summary_count_column + 2
+        supply_letter = get_column_letter(summary_supply_column)
+        tax_letter = get_column_letter(summary_tax_column)
 
         def write_summary_row(
             row_number: int,
@@ -500,87 +520,86 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             total: bool = False,
         ) -> None:
             for column, value in zip(
-                (invoice_count_column, invoice_supply_column, invoice_tax_column),
+                (summary_count_column, summary_supply_column, summary_tax_column),
                 (label, supply_value, tax_value),
             ):
                 cell = sheet.cell(row_number, column, value)
                 _style_ledger_cell(cell, bold=True, total=total)
                 cell.alignment = Alignment(horizontal="right", vertical="bottom")
-                if column != invoice_count_column:
+                if column != summary_count_column:
                     cell.number_format = MONEY_FORMAT
 
-        adjustment_row = invoice_total_row + 1
-        write_summary_row(
-            adjustment_row,
-            "단수차이 조정",
-            f"={invoice_supply_ref}",
-            f"=ROUNDDOWN({supply_letter}{adjustment_row}*0.1,0)",
-        )
-        base_supply_ref = f"{supply_letter}{adjustment_row}"
-        base_tax_ref = f"{tax_letter}{adjustment_row}"
-        summary_row = adjustment_row + 1
+        supply_terms: list[str] = []
+        tax_terms: list[str] = []
+        if invoice_present:
+            adjustment_row = summary_row
+            write_summary_row(
+                adjustment_row,
+                "단수차이 조정",
+                f"={supply_letter}{invoice_total_row}",
+                f"=ROUNDDOWN({supply_letter}{adjustment_row}*0.1,0)",
+            )
+            base_supply_ref = f"{supply_letter}{adjustment_row}"
+            base_tax_ref = f"{tax_letter}{adjustment_row}"
+            summary_row = adjustment_row + 1
 
-        if has_fixed_purchase:
-            general_row = summary_row
-            fixed_row = general_row + 1
-            split_total_row = fixed_row + 1
-            write_summary_row(
-                general_row,
-                "일반",
-                _total_value(result.purchase_summary, "item", "일반매입", "supply_amount"),
-                f"={base_tax_ref}-{tax_letter}{fixed_row}",
-            )
-            write_summary_row(
-                fixed_row,
-                "고정",
-                _total_value(result.purchase_summary, "item", "고정", "supply_amount"),
-                _total_value(result.purchase_summary, "item", "고정", "tax_amount"),
-            )
-            write_summary_row(
-                split_total_row,
-                "계",
-                f"={supply_letter}{general_row}+{supply_letter}{fixed_row}",
-                f"={tax_letter}{general_row}+{tax_letter}{fixed_row}",
-                total=True,
-            )
-            base_supply_ref = f"{supply_letter}{split_total_row}"
-            base_tax_ref = f"{tax_letter}{split_total_row}"
-            summary_row = split_total_row + 1
-
-        other_rows: list[int] = []
-        for label, key in (("카드외", "카드외"), ("의제매입세액", "의제매입세액")):
-            if _has_values(result.purchase_summary, "item", key):
+            if has_fixed_purchase:
+                general_row = summary_row
+                fixed_row = general_row + 1
+                split_total_row = fixed_row + 1
                 write_summary_row(
-                    summary_row,
-                    label,
-                    _total_value(result.purchase_summary, "item", key, "supply_amount"),
-                    _total_value(result.purchase_summary, "item", key, "tax_amount"),
+                    general_row,
+                    "일반",
+                    _total_value(result.purchase_summary, "item", "일반매입", "supply_amount"),
+                    f"={base_tax_ref}-{tax_letter}{fixed_row}",
                 )
-                other_rows.append(summary_row)
-                summary_row += 1
+                write_summary_row(
+                    fixed_row,
+                    "고정",
+                    _total_value(result.purchase_summary, "item", "고정", "supply_amount"),
+                    _total_value(result.purchase_summary, "item", "고정", "tax_amount"),
+                )
+                write_summary_row(
+                    split_total_row,
+                    "계",
+                    f"={supply_letter}{general_row}+{supply_letter}{fixed_row}",
+                    f"={tax_letter}{general_row}+{tax_letter}{fixed_row}",
+                    total=True,
+                )
+                base_supply_ref = f"{supply_letter}{split_total_row}"
+                base_tax_ref = f"{tax_letter}{split_total_row}"
+                summary_row = split_total_row + 1
+            supply_terms.append(base_supply_ref)
+            tax_terms.append(base_tax_ref)
+
+        for key in other_purchase_keys:
+            write_summary_row(
+                summary_row,
+                key,
+                _total_value(result.purchase_summary, "item", key, "supply_amount"),
+                _total_value(result.purchase_summary, "item", key, "tax_amount"),
+            )
+            supply_terms.append(f"{supply_letter}{summary_row}")
+            tax_terms.append(f"{tax_letter}{summary_row}")
+            summary_row += 1
 
         deduction_labels = [
             label
             for label in ("불공", "공통")
             if _has_values(result.purchase_summary, "item", label)
         ]
-        overall_supply_ref = base_supply_ref
-        overall_tax_ref = base_tax_ref
-        if other_rows:
-            overall_row = summary_row
+        overall_supply_ref = supply_terms[0]
+        overall_tax_ref = tax_terms[0]
+        if len(supply_terms) > 1:
             write_summary_row(
-                overall_row,
+                summary_row,
                 "계",
-                f"={base_supply_ref}" + "".join(
-                    f"+{supply_letter}{row_number}" for row_number in other_rows
-                ),
-                f"={base_tax_ref}" + "".join(
-                    f"+{tax_letter}{row_number}" for row_number in other_rows
-                ),
+                "=" + "+".join(supply_terms),
+                "=" + "+".join(tax_terms),
                 total=True,
             )
-            overall_supply_ref = f"{supply_letter}{overall_row}"
-            overall_tax_ref = f"{tax_letter}{overall_row}"
+            overall_supply_ref = f"{supply_letter}{summary_row}"
+            overall_tax_ref = f"{tax_letter}{summary_row}"
             summary_row += 1
 
         deduction_rows: list[int] = []
@@ -705,8 +724,8 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     payment_row_count = 1 + payment_adjustment_count + int(payment_adjustment_count > 0)
     compact_wide_layout = (
         slots_per_band == 4
-        and invoice_total_row is not None
-        and 0 < len(visible_detail_items) <= 3
+        and invoice_slot is not None
+        and 0 < len(visible_detail_items) <= invoice_slot
     )
     if visible_detail_items:
         detail_title_row = (
@@ -750,9 +769,9 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
 
     if compact_wide_layout:
         sales_gap = 4 if has_fixed_purchase else 2
+        sales_title_row = max(detail_end_row, purchase_end_row + payment_row_count) + sales_gap
     else:
-        sales_gap = 6
-    sales_title_row = detail_end_row + sales_gap
+        sales_title_row = detail_end_row + 6
     sales_end_row = sales_title_row - 1
     taxable_sales_refs: list[str] = []
     exempt_invoice_refs: list[str] = []
@@ -925,16 +944,22 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
 
     row = max(row, next_summary_row - 1, card_total_row, sales_type_end_row)
 
-    if sales_tax_ref and purchase_deductible_tax_ref:
+    if sales_tax_ref or purchase_deductible_tax_ref or payment_adjustment_count:
         payment_start_row = purchase_end_row + 1
         payment_label_column = summary_end_column - 4
         payment_value_column = summary_end_column - 3
         if compact_wide_layout and len(visible_detail_items) == 3:
             payment_label_column = summary_end_column - 1
             payment_value_column = summary_end_column
-        payment_rows: list[tuple[str, object]] = [
-            ("납부", f"={sales_tax_ref}-{purchase_deductible_tax_ref}"),
-        ]
+        if sales_tax_ref and purchase_deductible_tax_ref:
+            payable: object = f"={sales_tax_ref}-{purchase_deductible_tax_ref}"
+        elif sales_tax_ref:
+            payable = f"={sales_tax_ref}"
+        elif purchase_deductible_tax_ref:
+            payable = f"=-{purchase_deductible_tax_ref}"
+        else:
+            payable = 0
+        payment_rows: list[tuple[str, object]] = [("납부", payable)]
         if settings.card_sales_deduction:
             payment_rows.append(("카드", settings.card_sales_deduction))
         if settings.prior_period_credit:
@@ -956,6 +981,10 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             value_cell.number_format = MONEY_FORMAT
         row = max(row, payment_start_row + len(payment_rows) - 1)
 
+    last_column = max(
+        summary_end_column,
+        4 + len(sales_accounts) if multiple_sales_accounts else summary_end_column,
+    )
     for row_number in range(1, row + 1):
         sheet.row_dimensions[row_number].height = LEDGER_ROW_HEIGHT
 
@@ -963,7 +992,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         min_row=1,
         max_row=row,
         min_col=1,
-        max_col=summary_end_column,
+        max_col=last_column,
     ):
         for cell in row_cells:
             cell.fill = WHITE_FILL
@@ -971,9 +1000,9 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     for row_number in range(3, row + 1):
         has_content = any(
             sheet.cell(row_number, column).value is not None
-            for column in range(1, summary_end_column + 1)
+            for column in range(1, last_column + 1)
         )
-        for column in range(1, summary_end_column + 1):
+        for column in range(1, last_column + 1):
             cell = sheet.cell(row_number, column)
             is_total_cell = getattr(cell.border.top, "style", None) == "medium"
             sheet.cell(row_number, column).border = Border(
@@ -983,7 +1012,8 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
 
     sheet.sheet_view.showGridLines = False
     widths = (4, 16, 14, 10, 11, 14, 10, 9, 14, 10, 14, 14, 10)
-    for column, width in enumerate(widths[:summary_end_column], start=1):
+    for column in range(1, last_column + 1):
+        width = widths[column - 1] if column <= len(widths) else 14
         sheet.column_dimensions[get_column_letter(column)].width = width
     sheet.page_setup.orientation = "portrait"
     sheet.page_setup.paperWidth = "170mm"
@@ -998,7 +1028,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     sheet.page_margins.header = 0
     sheet.page_margins.footer = 0
     sheet.print_options.horizontalCentered = True
-    sheet.print_area = f"A1:{get_column_letter(summary_end_column)}{row}"
+    sheet.print_area = f"A1:{get_column_letter(last_column)}{row}"
 
 
 def _write_table_sheet(
@@ -1030,6 +1060,7 @@ def _write_table_sheet(
         for column, field, alignment, number_format in column_styles:
             value = _excel_value(record.get(field, ""))
             cell = sheet.cell(row_number, column, value)
+            _keep_text(cell)
             cell.border = TABLE_BORDER
             cell.alignment = alignment
             if number_format:

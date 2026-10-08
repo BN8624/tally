@@ -1,11 +1,267 @@
 # 결과 엑셀의 필수 시트와 핵심 집계 셀 및 수식을 검증합니다.
 from datetime import date
 from decimal import Decimal
+import math
+import random
+import re
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.worksheet.worksheet import Worksheet
 import pandas as pd
 
 from tally import CompanySettings, export_workbook, process_transactions
+from tally.export import _build_summary
+
+
+def _excel_round(value: float) -> float:
+    return float(f"{value:.15g}")
+
+
+def _formula_value(sheet, reference: str) -> float:
+    cell = sheet[reference]
+    if cell.data_type != "f":
+        return cell.value or 0
+
+    def expand_sum(match: re.Match) -> str:
+        min_col, min_row, max_col, max_row = range_boundaries(match.group(1))
+        cells = [
+            f"{get_column_letter(column)}{row}"
+            for row in range(min_row, max_row + 1)
+            for column in range(min_col, max_col + 1)
+        ]
+        return "(" + "+".join(cells) + ")"
+
+    expression = re.sub(r"SUM\(([A-Z]+\d+:[A-Z]+\d+)\)", expand_sum, cell.value[1:])
+    expression = re.sub(r"\b([A-Z]{1,2}\d+)\b", r'V("\1")', expression)
+    return eval(
+        expression,
+        {
+            "V": lambda ref: _formula_value(sheet, ref),
+            "ROUNDDOWN": lambda value, _digits: math.trunc(_excel_round(value)),
+            "ROUNDUP": lambda value, _digits: math.copysign(math.ceil(abs(_excel_round(value))), value),
+        },
+    )
+
+
+def _labelled_value(sheet, label: str) -> float:
+    cell = next(cell for row in sheet.iter_rows() for cell in row if cell.value == label)
+    return _formula_value(sheet, f"{get_column_letter(cell.column + 1)}{cell.row}")
+
+
+def _detail_row(
+    number: int,
+    division: str,
+    original_type: str,
+    supply: int,
+    tax: int,
+    *,
+    vendor: str = "거래처",
+    code: str = "",
+    account_name: str = "",
+) -> dict[str, object]:
+    return {
+        "row_id": f"Sheet1:{number}",
+        "sheet": "Sheet1",
+        "source_row": number,
+        "division": division,
+        "date": date(2026, 4, 1),
+        "month": "2026-04",
+        "vendor": vendor,
+        "item": "품목",
+        "supply_amount": Decimal(supply),
+        "tax_amount": Decimal(tax),
+        "total_amount": Decimal(supply + tax),
+        "original_type": original_type,
+        "account_code": code,
+        "account_name": account_name,
+        "card_company": "",
+        "card_number": "",
+    }
+
+
+def _summary_for(tmp_path, rows: list[dict[str, object]], settings: CompanySettings | None = None):
+    settings = settings or CompanySettings(name="검증상사")
+    result = process_transactions(pd.DataFrame(rows), settings)
+    output = export_workbook(result, settings, tmp_path / "summary.xlsx")
+    return load_workbook(output, data_only=False)["집계표"]
+
+
+def test_tobacco_layout_does_not_overwrite_purchase_summary(tmp_path) -> None:
+    summary = _summary_for(
+        tmp_path,
+        [
+            _detail_row(1, "매입", "과세", 1000, 100, vendor="KT&G", code="146", account_name="상품"),
+            _detail_row(2, "매입", "카과", 1000, 100),
+            _detail_row(3, "매입", "현과", 1000, 100),
+            _detail_row(4, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
+        ],
+    )
+    assert _labelled_value(summary, "카드외") in (2000, 200)
+    assert _labelled_value(summary, "납부") == -100
+
+
+def test_three_purchase_detail_tables_keep_payment_inputs(tmp_path) -> None:
+    summary = _summary_for(
+        tmp_path,
+        [
+            _detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
+            _detail_row(2, "매입", "과세", 1000, 100, vendor="KT&G", code="146", account_name="상품"),
+            _detail_row(3, "매입", "카과", 1000, 100),
+            _detail_row(4, "매입", "현과", 1000, 100),
+            _detail_row(5, "매입", "면세", 500, 0),
+            _detail_row(6, "매출", "과세", 5000, 500, code="401", account_name="상품매출"),
+        ],
+    )
+    assert _labelled_value(summary, "납부") == 100
+
+
+def test_payment_is_calculated_without_invoice_purchase(tmp_path) -> None:
+    summary = _summary_for(
+        tmp_path,
+        [
+            _detail_row(1, "매입", "카과", 1000, 100),
+            _detail_row(2, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
+        ],
+        CompanySettings(name="검증상사", card_sales_deduction=10),
+    )
+    assert _labelled_value(summary, "납부") == 100
+    assert _labelled_value(summary, "차감") == 90
+
+
+def test_payment_is_calculated_without_taxable_sales(tmp_path) -> None:
+    summary = _summary_for(
+        tmp_path,
+        [
+            _detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
+            _detail_row(2, "매출", "면세", 500, 0, code="401", account_name="상품매출"),
+        ],
+        CompanySettings(name="검증상사", prior_period_credit=10),
+    )
+    assert _labelled_value(summary, "납부") == -100
+    assert _labelled_value(summary, "차감") == -110
+
+
+def test_print_area_includes_every_sales_account_column(tmp_path) -> None:
+    rows = [_detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품")]
+    rows += [
+        _detail_row(10 + index, "매출", "과세", 1000, 100, code="401", account_name=f"매출계정{index}")
+        for index in range(7)
+    ]
+    summary = _summary_for(tmp_path, rows)
+    last_column = range_boundaries(summary.print_area.split("!")[1].replace("$", ""))[2]
+    account_columns = [
+        cell.column
+        for row in summary.iter_rows()
+        for cell in row
+        if isinstance(cell.value, str) and cell.value.startswith("매출계정")
+    ]
+    assert len(account_columns) == 7
+    assert max(account_columns) <= last_column
+
+
+def _random_layout_rows(rng: random.Random) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    months = rng.choice([[4], [4, 5, 6], [1, 2, 3, 4, 5, 6]])
+
+    def add(division: str, original_type: str, supply: int, tax: int, code: str = "", name: str = "", vendor: str = "거래처") -> None:
+        for month in months:
+            row = _detail_row(len(rows) + 1, division, original_type, supply, tax, vendor=vendor, code=code, account_name=name)
+            row["date"] = date(2026, month, 1)
+            row["month"] = f"2026-{month:02d}"
+            rows.append(row)
+
+    purchase_tax = [("146", ""), ("146", "KT&G"), ("156", ""), ("512", ""), ("612", ""), ("813", ""), ("212", ""), ("899", "")]
+    for code, vendor in rng.sample(purchase_tax, rng.randint(0, 5)):
+        add("매입", "과세", 1000, 100, code, "계정", vendor)
+    for original_type, code in (("불공", "813"), ("공통", "813")):
+        if rng.random() < 0.3:
+            add("매입", original_type, 200, 20, code, "계정")
+    for original_type in rng.sample(["카과", "현과", "카면", "카영", "현면", "현영", "의제", "면세", "영세"], rng.randint(0, 5)):
+        add("매입", original_type, 500, 50 if original_type in {"카과", "현과", "의제"} else 0)
+    for index in range(rng.choice([0, 1, 2, 8])):
+        add("매출", "과세", 2000, 200, "401", f"매출{index}")
+    for original_type in rng.sample(["면세", "카과", "카면", "현과", "현면", "건별", "면건", "제로"], rng.randint(0, 5)):
+        if original_type == "제로":
+            add("매출", "카과", 300, 30, "401", "상품매출", vendor="제로페이")
+        else:
+            add("매출", original_type, 700, 70 if original_type in {"카과", "현과", "건별"} else 0, "401", "상품매출")
+    return rows
+
+
+def test_summary_layout_never_overwrites_cells_or_leaves_print_area(monkeypatch) -> None:
+    writes: dict[tuple[int, int], list[object]] = {}
+    merges: list[tuple[int, int, int, int]] = []
+    original_cell = Worksheet.cell
+    original_merge = Worksheet.merge_cells
+
+    def recording_cell(self, row, column, value=None):
+        if value is not None and self.title == "집계표":
+            writes.setdefault((row, column), []).append(value)
+        return original_cell(self, row, column, value)
+
+    def recording_merge(self, range_string=None, start_row=None, start_column=None, end_row=None, end_column=None):
+        if self.title == "집계표":
+            merges.append((start_row, start_column, end_row, end_column))
+        return original_merge(self, range_string, start_row, start_column, end_row, end_column)
+
+    monkeypatch.setattr(Worksheet, "cell", recording_cell)
+    monkeypatch.setattr(Worksheet, "merge_cells", recording_merge)
+    for seed in range(30):
+        rows = _random_layout_rows(random.Random(seed))
+        if not rows:
+            continue
+        writes.clear()
+        merges.clear()
+        settings = CompanySettings(
+            name="배치검사",
+            fixed_asset_codes={"212"},
+            account_overrides={"899": "운송경비"},
+            card_sales_deduction=seed % 2 * 10,
+            prior_period_credit=seed % 3 * 10,
+        )
+        workbook = Workbook()
+        _build_summary(workbook, process_transactions(pd.DataFrame(rows), settings), settings)
+        sheet = workbook["집계표"]
+
+        overwritten = [key for key, values in writes.items() if len({str(value) for value in values}) > 1]
+        merged_away = [
+            key
+            for key in writes
+            for top, left, bottom, right in merges
+            if top <= key[0] <= bottom and left <= key[1] <= right and key != (top, left)
+        ]
+        _, _, last_column, last_row = range_boundaries(sheet.print_area.split("!")[1].replace("$", ""))
+        outside = [key for key in writes if key[0] > last_row or key[1] > last_column]
+        assert (seed, overwritten, merged_away, outside) == (seed, [], [], [])
+        assert any("납부" in map(str, values) for values in writes.values()), seed
+
+
+def test_text_starting_with_equals_is_not_saved_as_formula(tmp_path) -> None:
+    rows = [
+        _detail_row(1, "매입", "과세", 1000, 100, vendor="=1+2", code="899", account_name="잡비"),
+        _detail_row(2, "매입", "과세", 1000, 100, vendor="상사", code="813", account_name="접대비"),
+        _detail_row(3, "매출", "과세", 2000, 200, code="401", account_name="=매출"),
+    ]
+    settings = CompanySettings(name="=업체", account_overrides={"899": "=분류"})
+    result = process_transactions(
+        pd.DataFrame(rows),
+        settings,
+        decisions={"Sheet1:2": {"decision": "판단 보류", "memo": "=SUM(A1:A2)"}},
+    )
+    workbook = load_workbook(export_workbook(result, settings, tmp_path / "text.xlsx"), data_only=False)
+
+    texts = {"=1+2", "=SUM(A1:A2)", "=업체", "=분류", "=매출"}
+    found = {
+        cell.value: cell.data_type
+        for sheet in workbook.worksheets
+        for row in sheet.iter_rows()
+        for cell in row
+        if isinstance(cell.value, str) and any(text in cell.value for text in texts)
+    }
+    assert texts <= set(found)
+    assert set(found.values()) == {"s"}
+    assert workbook["집계표"]["B5"].data_type == "f"
 
 
 def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
