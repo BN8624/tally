@@ -28,6 +28,21 @@ def _error_text(exc: Exception) -> str:
     return str(exc)
 
 
+def _result_matches(
+    context: tuple[str, str, dict[str, object]] | None,
+    file_path: str,
+    company: str,
+    store: SettingsStore,
+) -> bool:
+    if context is None:
+        return False
+    try:
+        current_settings = store.get(company).to_dict()
+    except KeyError:
+        return False
+    return context == (file_path, company, current_settings)
+
+
 class CompanyDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc) -> None:
         super().__init__(parent)
@@ -115,6 +130,8 @@ class TallyApp(tk.Tk):
         self.store = SettingsStore()
         self.source_data: pd.DataFrame | None = None
         self.result = None
+        self.result_settings: CompanySettings | None = None
+        self.result_context: tuple[str, str, dict[str, object]] | None = None
         self.decisions: dict[str, dict[str, str]] = {}
         self.file_var = tk.StringVar()
         self.company_var = tk.StringVar()
@@ -159,6 +176,7 @@ class TallyApp(tk.Tk):
         ttk.Label(form, text="업체").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=8)
         self.company_combo = ttk.Combobox(form, textvariable=self.company_var, state="readonly", width=45)
         self.company_combo.grid(row=0, column=1, sticky="ew", pady=8)
+        self.company_combo.bind("<<ComboboxSelected>>", lambda _: self._refresh_stale_state())
         ttk.Button(form, text="새 업체 설정 추가", command=self._add_company).grid(row=0, column=2, padx=(10, 0))
 
         ttk.Label(form, text="전체 매입매출장").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=8)
@@ -296,6 +314,7 @@ class TallyApp(tk.Tk):
         self.store.save(dialog.result)
         self._refresh_companies()
         self.company_var.set(dialog.result.name)
+        self._refresh_stale_state()
 
     def _select_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -305,6 +324,7 @@ class TallyApp(tk.Tk):
         )
         if path:
             self.file_var.set(path)
+            self._refresh_stale_state()
 
     def _process_file(self) -> None:
         if not self.company_var.get():
@@ -315,13 +335,54 @@ class TallyApp(tk.Tk):
             return
 
         def load() -> None:
-            self.source_data = parse_workbook(self.file_var.get())
-            self.decisions = {}
-            self._recalculate()
+            self._clear_result()
+            file_path = self.file_var.get()
+            company = self.company_var.get()
+            settings = self.store.get(company)
+            source_data = parse_workbook(file_path)
+            self.result = process_transactions(source_data, settings)
+            self.source_data = source_data
+            self.result_settings = settings
+            self.result_context = (file_path, company, settings.to_dict())
+            self._refresh_views()
 
         if not self._guarded("처리 실패", load):
+            self.status_var.set("처리 실패. 이전 결과는 지웠습니다. 오류를 확인한 뒤 다시 처리하세요.")
             return
         self.notebook.select(self.review_tab if not self.result.review.empty else self.result_tab)
+
+    def _clear_result(self) -> None:
+        self.result = None
+        self.source_data = None
+        self.result_settings = None
+        self.result_context = None
+        self.decisions = {}
+        self._refresh_review_tree()
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.configure(state="disabled")
+        self.result_banner.configure(text="아직 처리한 결과가 없습니다.", foreground="")
+
+    def _result_is_current(self) -> bool:
+        return _result_matches(self.result_context, self.file_var.get(), self.company_var.get(), self.store)
+
+    def _refresh_stale_state(self) -> None:
+        if self.result is not None and not self._result_is_current():
+            self.result_banner.configure(text="재처리 필요", foreground="#9C0006")
+            self.status_var.set("파일·업체·업체 설정이 바뀌었습니다. 처리 시작을 다시 실행하세요.")
+
+    def _require_current_result(self, action: str) -> bool:
+        if self.result is None:
+            messagebox.showwarning("처리 결과", "먼저 엑셀 파일을 처리하세요.", parent=self)
+            return False
+        if not self._result_is_current():
+            messagebox.showwarning(
+                "재처리 필요",
+                f"처리한 뒤 파일·업체·업체 설정이 바뀌었습니다. 처리 시작을 다시 실행한 뒤 {action}하세요.",
+                parent=self,
+            )
+            return False
+        return True
 
     def _guarded(self, title: str, action: Callable[[], None]) -> bool:
         try:
@@ -332,10 +393,12 @@ class TallyApp(tk.Tk):
         return True
 
     def _recalculate(self) -> None:
-        if self.source_data is None:
+        if self.source_data is None or self.result_settings is None:
             return
-        settings = self.store.get(self.company_var.get())
-        self.result = process_transactions(self.source_data, settings, self.decisions)
+        self.result = process_transactions(self.source_data, self.result_settings, self.decisions)
+        self._refresh_views()
+
+    def _refresh_views(self) -> None:
         self._refresh_review_tree()
         self._refresh_result_text()
         pending = int(self.result.review["review_status"].eq("판단 보류").sum())
@@ -407,6 +470,8 @@ class TallyApp(tk.Tk):
         return {"decision": decision, "reason": reason, "memo": self.memo_var.get().strip()}
 
     def _apply_selected(self) -> None:
+        if not self._require_current_result("판정을 적용"):
+            return
         row_id = self._selected_row_id()
         payload = self._decision_payload()
         if row_id is None or payload is None:
@@ -415,6 +480,8 @@ class TallyApp(tk.Tk):
         self._guarded("판정 적용 실패", self._recalculate)
 
     def _apply_same_condition(self) -> None:
+        if not self._require_current_result("판정을 적용"):
+            return
         row_id = self._selected_row_id()
         payload = self._decision_payload()
         if row_id is None or payload is None or self.result is None:
@@ -475,8 +542,7 @@ class TallyApp(tk.Tk):
         self.result_text.configure(state="disabled")
 
     def _save_output(self) -> None:
-        if self.result is None:
-            messagebox.showwarning("처리 결과", "먼저 엑셀 파일을 처리하세요.", parent=self)
+        if not self._require_current_result("저장"):
             return
         if not self.result.validation_passed:
             if not messagebox.askyesno(
@@ -504,7 +570,7 @@ class TallyApp(tk.Tk):
 
         def save() -> None:
             settings = replace(
-                self.store.get(self.company_var.get()),
+                self.result_settings,
                 prior_period_credit=prior_credit,
                 card_sales_deduction=card_deduction,
             )
