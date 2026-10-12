@@ -718,9 +718,11 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
     )
 
     detail_end_row = purchase_end_row
-    payment_adjustment_count = int(bool(settings.card_sales_deduction)) + int(
-        bool(settings.prior_period_credit)
+    card_deduction_applies = settings.card_deduction_eligible and any(
+        _has_values(result.sales_summary, "item", key, fields=("total_amount",))
+        for key in ("카드 과세", "현영 과세", "제로페이")
     )
+    payment_adjustment_count = int(card_deduction_applies) + int(bool(settings.prior_period_credit))
     payment_row_count = 1 + payment_adjustment_count + int(payment_adjustment_count > 0)
     compact_wide_layout = (
         slots_per_band == 4
@@ -887,16 +889,9 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
         _style_ledger_cell(label, bold=True)
         label.alignment = Alignment(horizontal="right", vertical="bottom")
         if has_other_taxable:
-            supply = sheet.cell(
-                other_row,
-                3,
-                _total_value(result.sales_summary, "item", "기타", "supply_amount"),
-            )
-            tax = sheet.cell(
-                other_row,
-                4,
-                _total_value(result.sales_summary, "item", "기타", "tax_amount"),
-            )
+            other_total = _total_value(result.sales_summary, "item", "기타", "total_amount")
+            supply = sheet.cell(other_row, 3, f"=ROUNDUP({other_total}/1.1,0)")
+            tax = sheet.cell(other_row, 4, f"={other_total}-C{other_row}")
             for cell in (supply, tax):
                 _style_ledger_cell(cell, bold=True)
                 cell.alignment = Alignment(horizontal="right", vertical="bottom")
@@ -944,7 +939,7 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
 
     row = max(row, next_summary_row - 1, card_total_row, sales_type_end_row)
 
-    if sales_tax_ref or purchase_deductible_tax_ref or payment_adjustment_count:
+    if sales_tax_ref or purchase_deductible_tax_ref or settings.prior_period_credit:
         payment_start_row = purchase_end_row + 1
         payment_label_column = summary_end_column - 4
         payment_value_column = summary_end_column - 3
@@ -959,18 +954,24 @@ def _build_summary(workbook: Workbook, result: ProcessingResult, settings: Compa
             payable = f"=-{purchase_deductible_tax_ref}"
         else:
             payable = 0
+        payable_ref = f"{get_column_letter(payment_value_column)}{payment_start_row}"
         payment_rows: list[tuple[str, object]] = [("납부", payable)]
-        if settings.card_sales_deduction:
-            payment_rows.append(("카드", settings.card_sales_deduction))
+        card_deduction_base_ref = sales_type_refs.get("과세")
+        if card_deduction_applies and card_deduction_base_ref:
+            payment_rows.append(
+                (
+                    "카드공제",
+                    f"=MAX(0,MIN(ROUNDDOWN({card_deduction_base_ref}*13/1000,0),{payable_ref}))",
+                )
+            )
         if settings.prior_period_credit:
             payment_rows.append(("예정미환급", settings.prior_period_credit))
-        if payment_adjustment_count:
-            first_value_ref = f"{get_column_letter(payment_value_column)}{payment_start_row}"
+        if len(payment_rows) > 1:
             adjustment_refs = [
                 f"{get_column_letter(payment_value_column)}{payment_start_row + offset}"
-                for offset in range(1, 1 + payment_adjustment_count)
+                for offset in range(1, len(payment_rows))
             ]
-            payment_rows.append(("차감", f"={first_value_ref}-" + "-".join(adjustment_refs)))
+            payment_rows.append(("차감", f"={payable_ref}-" + "-".join(adjustment_refs)))
         for offset, (label_text, value) in enumerate(payment_rows):
             payment_row = payment_start_row + offset
             label = sheet.cell(payment_row, payment_label_column, label_text)

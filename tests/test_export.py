@@ -9,6 +9,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 import pandas as pd
+import pytest
 
 from tally import CompanySettings, export_workbook, process_transactions
 from tally.export import _build_summary
@@ -40,6 +41,8 @@ def _formula_value(sheet, reference: str) -> float:
             "V": lambda ref: _formula_value(sheet, ref),
             "ROUNDDOWN": lambda value, _digits: math.trunc(_excel_round(value)),
             "ROUNDUP": lambda value, _digits: math.copysign(math.ceil(abs(_excel_round(value))), value),
+            "MIN": min,
+            "MAX": max,
         },
     )
 
@@ -123,7 +126,7 @@ def test_payment_is_calculated_without_invoice_purchase(tmp_path) -> None:
             _detail_row(1, "매입", "카과", 1000, 100),
             _detail_row(2, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
         ],
-        CompanySettings(name="검증상사", card_sales_deduction=10),
+        CompanySettings(name="검증상사", prior_period_credit=10),
     )
     assert _labelled_value(summary, "납부") == 100
     assert _labelled_value(summary, "차감") == 90
@@ -140,6 +143,49 @@ def test_payment_is_calculated_without_taxable_sales(tmp_path) -> None:
     )
     assert _labelled_value(summary, "납부") == -100
     assert _labelled_value(summary, "차감") == -110
+
+
+@pytest.mark.parametrize(
+    ("purchase_supply", "eligible", "expected"),
+    [
+        (1000, True, {"납부": 1100, "카드공제": 171, "차감": 929}),
+        (10000, True, {"납부": 200, "카드공제": 171, "차감": 29}),
+        (11000, True, {"납부": 100, "카드공제": 100, "차감": 0}),
+        (20000, True, {"납부": -800, "카드공제": 0, "차감": -800}),
+        (1000, False, {"납부": 1100}),
+    ],
+)
+def test_card_sales_deduction_is_13_per_1000_capped_by_payable(
+    tmp_path, purchase_supply: int, eligible: bool, expected: dict[str, int]
+) -> None:
+    summary = _summary_for(
+        tmp_path,
+        [
+            _detail_row(1, "매입", "과세", purchase_supply, purchase_supply // 10, code="146", account_name="상품"),
+            _detail_row(2, "매출", "카과", 10000, 1000, code="401", account_name="상품매출"),
+            _detail_row(3, "매출", "현과", 1000, 100, code="401", account_name="상품매출"),
+            _detail_row(4, "매출", "카과", 1000, 100, vendor="제로페이", code="401", account_name="상품매출"),
+            _detail_row(5, "매출", "카면", 5000, 0, code="401", account_name="상품매출"),
+        ],
+        CompanySettings(name="검증상사", card_deduction_eligible=eligible),
+    )
+    labels = {cell.value for row in summary.iter_rows() for cell in row if isinstance(cell.value, str)}
+    assert {label: _labelled_value(summary, label) for label in expected} == expected
+    assert {"카드공제", "차감"}.isdisjoint(labels) == (not eligible)
+
+
+def test_other_sales_are_split_back_from_total_amount(tmp_path) -> None:
+    summary = _summary_for(
+        tmp_path,
+        [
+            _detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
+            _detail_row(2, "매출", "건별", 1008420, 100849, code="401", account_name="상품매출"),
+            _detail_row(3, "매출", "건별", -500, -50, code="401", account_name="상품매출"),
+        ],
+    )
+    label = next(cell for row in summary.iter_rows() for cell in row if cell.value == "기타")
+    assert _formula_value(summary, f"C{label.row}") == 1007927
+    assert _formula_value(summary, f"D{label.row}") == 100792
 
 
 def test_print_area_includes_every_sales_account_column(tmp_path) -> None:
@@ -217,7 +263,7 @@ def test_summary_layout_never_overwrites_cells_or_leaves_print_area(monkeypatch)
             name="배치검사",
             fixed_asset_codes={"212"},
             account_overrides={"899": "운송경비"},
-            card_sales_deduction=seed % 2 * 10,
+            card_deduction_eligible=bool(seed % 2),
             prior_period_credit=seed % 3 * 10,
         )
         workbook = Workbook()
@@ -781,11 +827,7 @@ def test_export_includes_zero_rated_other_sales_and_optional_adjustments(tmp_pat
         row(4, "매출", "건별", 500, 50, "상품매출"),
         row(5, "매출", "면건", 300, 0, "상품매출"),
     ]
-    settings = CompanySettings(
-        name="조정테스트",
-        prior_period_credit=100,
-        card_sales_deduction=20,
-    )
+    settings = CompanySettings(name="조정테스트", prior_period_credit=100)
     result = process_transactions(pd.DataFrame(rows), settings)
     output = export_workbook(result, settings, tmp_path / "adjusted-layout.xlsx")
     summary = load_workbook(output, data_only=False)["집계표"]
@@ -800,15 +842,14 @@ def test_export_includes_zero_rated_other_sales_and_optional_adjustments(tmp_pat
     assert labels["영세 매입"]
     assert labels["기타"]
     other_row = labels["기타"].row
-    assert summary.cell(other_row, 3).value == 500
-    assert summary.cell(other_row, 4).value == 50
+    assert _formula_value(summary, f"C{other_row}") == 500
+    assert _formula_value(summary, f"D{other_row}") == 50
     assert summary.cell(other_row, 6).value == 300
 
-    payable = labels["납부"]
-    assert summary.cell(payable.row, payable.column + 1).value.startswith("=D")
-    assert summary.cell(labels["카드"].row, labels["카드"].column + 1).value == 20
+    assert "카드공제" not in labels
+    assert _labelled_value(summary, "납부") == 50
     assert summary.cell(labels["예정미환급"].row, labels["예정미환급"].column + 1).value == 100
-    assert summary.cell(labels["차감"].row, labels["차감"].column + 1).value.startswith("=")
+    assert _labelled_value(summary, "차감") == -50
     assert sum(
         cell.value == "단수차이 조정"
         for row_cells in summary.iter_rows()

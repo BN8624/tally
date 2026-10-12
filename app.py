@@ -59,6 +59,7 @@ class CompanyDialog(tk.Toplevel):
         self.vehicle_var = tk.StringVar(value="차량유지비, 주유, 수리, 타이어, 세차, 자동차")
         self.vendor_var = tk.StringVar()
         self.personal_var = tk.StringVar(value="개인사용, 가사용, 사적, 가사")
+        self.card_deduction_var = tk.BooleanVar(value=True)
 
         fields = [
             ("업체명", self.name_var),
@@ -84,6 +85,12 @@ class CompanyDialog(tk.Toplevel):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 12))
             ttk.Entry(frame, textvariable=variable, width=48).grid(row=row, column=1, sticky="ew", pady=4)
             row += 1
+        ttk.Checkbutton(
+            frame,
+            text="카드매출 세액공제 대상 · 과세 결제 합계의 13/1000, 납부세액 한도",
+            variable=self.card_deduction_var,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
 
         button_frame = ttk.Frame(frame)
         button_frame.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
@@ -113,6 +120,7 @@ class CompanyDialog(tk.Toplevel):
                 vehicle_keywords=self._split(self.vehicle_var.get()),
                 vendor_keywords=self._split(self.vendor_var.get()),
                 personal_keywords=self._split(self.personal_var.get()),
+                card_deduction_eligible=self.card_deduction_var.get(),
             )
         except ValueError as exc:
             messagebox.showerror("업체 설정 오류", str(exc), parent=self)
@@ -136,7 +144,6 @@ class TallyApp(tk.Tk):
         self.file_var = tk.StringVar()
         self.company_var = tk.StringVar()
         self.prior_credit_var = tk.StringVar()
-        self.card_deduction_var = tk.StringVar()
         self.filter_var = tk.StringVar(value="전체")
         self.decision_var = tk.StringVar(value="과세 유지")
         self.reason_var = tk.StringVar()
@@ -184,11 +191,9 @@ class TallyApp(tk.Tk):
         ttk.Button(form, text="엑셀 선택", command=self._select_file).grid(row=1, column=2, padx=(10, 0))
         ttk.Label(form, text="예정미환급세액 · 선택").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=8)
         ttk.Entry(form, textvariable=self.prior_credit_var).grid(row=2, column=1, sticky="ew", pady=8)
-        ttk.Label(form, text="카드매출 세액공제 · 선택").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=8)
-        ttk.Entry(form, textvariable=self.card_deduction_var).grid(row=3, column=1, sticky="ew", pady=8)
         form.columnconfigure(1, weight=1)
         ttk.Button(form, text="처리 시작", command=self._process_file).grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(18, 0)
+            row=3, column=0, columnspan=3, sticky="ew", pady=(18, 0)
         )
 
         guide = (
@@ -563,18 +568,12 @@ class TallyApp(tk.Tk):
             return
         try:
             prior_credit = self._optional_amount(self.prior_credit_var.get(), "예정미환급세액")
-            card_deduction = self._optional_amount(self.card_deduction_var.get(), "카드매출 세액공제")
         except ValueError as exc:
             messagebox.showerror("조정액 입력 오류", str(exc), parent=self)
             return
 
         def save() -> None:
-            settings = replace(
-                self.result_settings,
-                prior_period_credit=prior_credit,
-                card_sales_deduction=card_deduction,
-            )
-            export_workbook(self.result, settings, path)
+            export_workbook(self.result, replace(self.result_settings, prior_period_credit=prior_credit), path)
 
         try:
             save()
