@@ -19,6 +19,7 @@ SUMMARY_KEYS = {
     "고정": "fixed",
     "세금계산서 계": "invoice",
     "카드": "card",
+    "의제": "deemed",
     "불공": "nondeductible",
     "매입계": "purchase",
     "세금계산서": "sales_invoice",
@@ -209,6 +210,38 @@ def test_input_cells_are_green_and_empty(tmp_path) -> None:
     tax_cell = sheet.cell(row, supply_column + 1)
     assert tax_cell.value is None
     assert tax_cell.fill.fgColor.rgb.endswith("C6EFCE")
+
+
+def test_deemed_supply_is_prefilled_after_card_from_exempt_first_column(tmp_path) -> None:
+    rows = [
+        transaction(1, "매입", "과세", 1000, 100, code="156"),
+        transaction(2, "매입", "면세", 500, 0, code="153"),
+        transaction(3, "매입", "면세", 200, 0, code="813"),
+    ]
+    _, workbook = exported(tmp_path, rows, industry="건설")
+    sheet = workbook["집계표"]
+    cells = summary_cells(sheet)
+    order = list(cells)
+    assert order[order.index("세금계산서 계") : order.index("매입계") + 1] == [
+        "세금계산서 계",
+        "카드",
+        "의제",
+        "불공",
+        "추가 불공",
+        "공통매입 면세사업분",
+        "매입계",
+    ]
+    row, supply_column = cells["의제"]
+    supply_cell, tax_cell = sheet.cell(row, supply_column), sheet.cell(row, supply_column + 1)
+    assert supply_cell.data_type == "f"
+    assert tax_cell.value is None
+    assert supply_cell.fill.fgColor.rgb.endswith("C6EFCE")
+    assert tax_cell.fill.fgColor.rgb.endswith("C6EFCE")
+    assert summary_value(sheet, "의제", "supply") == 500
+    assert (summary_value(sheet, "매입계", "supply"), summary_value(sheet, "매입계")) == (1500, 100)
+    supply_cell.value = 300
+    tax_cell.value = 9
+    assert (summary_value(sheet, "매입계", "supply"), summary_value(sheet, "매입계")) == (1300, 109)
 
 
 def test_taxi_relief_is_prefilled_and_allocated_below_summary(tmp_path) -> None:

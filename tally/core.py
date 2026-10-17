@@ -7,7 +7,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from .profiles import EXEMPT_CARD_COLUMNS, EXEMPT_PAYMENT, Profile, profile_for
+from .profiles import EXEMPT_CARD_COLUMNS, EXEMPT_PAYMENT, INPUT_DEEMED, Profile, profile_for
 from .settings import CompanySettings
 
 ZERO = Decimal(0)
@@ -329,7 +329,9 @@ def _summary(
     card_tax = cell_total(cells, CARD, card_labels, "tax")
     nondeductible_supply = cell_total(cells, NONDEDUCTIBLE, ["불공"], "supply")
     nondeductible_tax = cell_total(cells, NONDEDUCTIBLE, ["불공"], "tax")
-    purchase_supply = invoice_supply + card_supply - nondeductible_supply
+    deemed = INPUT_DEEMED in profile.inputs
+    deemed_supply = cell_total(cells, EXEMPT, [profile.exempt_label], "supply") if deemed else ZERO
+    purchase_supply = invoice_supply + card_supply + deemed_supply - nondeductible_supply
     purchase_tax = invoice_tax + card_tax - nondeductible_tax
 
     sales_labels = sum_labels(SALES, "계")
@@ -359,6 +361,7 @@ def _summary(
         SummaryRow("fixed", "고정", fixed_supply, fixed_tax),
         SummaryRow("invoice", "세금계산서 계", invoice_supply, invoice_tax),
         SummaryRow("card", "카드", card_supply, card_tax),
+        *([SummaryRow("deemed", "의제", deemed_supply, ZERO)] if deemed else []),
         SummaryRow("nondeductible", "불공", nondeductible_supply, nondeductible_tax),
         SummaryRow("purchase", "매입계", purchase_supply, purchase_tax),
         SummaryRow("sales_invoice", "세금계산서", sales_supply, sales_tax),

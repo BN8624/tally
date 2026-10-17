@@ -96,6 +96,22 @@ def test_construction_purchase_and_exempt_columns_follow_canon_rules() -> None:
     assert not result.validation_passed
 
 
+def test_deemed_supply_follows_exempt_first_column_only_where_deemed_input_exists() -> None:
+    rows = [
+        transaction(1, "매입", "과세", 1000, 100, code="156"),
+        transaction(2, "매입", "면세", 500, 0, code="153"),
+        transaction(3, "매입", "면세", 200, 0, code="813"),
+    ]
+    construction = process(rows, industry="건설")
+    assert (construction.summary_value("deemed", "supply"), construction.summary_value("deemed")) == (500, 0)
+    assert construction.summary_value("purchase", "supply") == 1500
+    keys = [row.key for row in construction.summary]
+    assert keys[keys.index("card") + 1] == "deemed"
+    assert process(rows, industry="기본").summary_value("deemed", "supply") == 500
+    restaurant = process([*rows, transaction(4, "매입", "면세", 70, 0, code="146")], industry="음식점")
+    assert restaurant.summary_value("deemed", "supply") == 70
+
+
 def test_retail_card_purchases_split_goods_and_add_exempt_column() -> None:
     result = process(
         [

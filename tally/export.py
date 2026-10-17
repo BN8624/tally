@@ -184,10 +184,15 @@ def _cell_lookup(cells: pd.DataFrame, block: str) -> Callable[[str, str, str], o
 def _summary_rows(result: ProcessingResult) -> list[tuple[str, str, str]]:
     inputs = result.profile.inputs
     rows: list[tuple[str, str, str]] = [("section", "매입", "")]
-    rows += [("general", "일반", "formula"), ("fixed", "고정", "formula"), ("invoice", "세금계산서 계", "formula")]
+    rows += [
+        ("general", "일반", "formula"),
+        ("fixed", "고정", "formula"),
+        ("invoice", "세금계산서 계", "formula"),
+        ("card", "카드", "formula"),
+    ]
     if INPUT_DEEMED in inputs:
-        rows.append(("deemed", "의제", "input2"))
-    rows += [("card", "카드", "formula"), ("nondeductible", "불공", "formula"), ("extra_nondeductible", "추가 불공", "input2")]
+        rows.append(("deemed", "의제", "prefill_supply"))
+    rows += [("nondeductible", "불공", "formula"), ("extra_nondeductible", "추가 불공", "input2")]
     if INPUT_COMMON in inputs:
         rows.append(("common", INPUT_COMMON, "input2"))
     rows += [("purchase", "매입계", "formula"), ("section", "매출", "")]
@@ -261,10 +266,11 @@ def _render_summary(
         "fixed": (f"={ref(PURCHASE, '고정', 'supply')}", f"={ref(PURCHASE, '고정', 'tax')}"),
         "invoice": (f"={ref(PURCHASE, '계', 'supply')}", f"=ROUNDDOWN({s('invoice')}*0.1,0)"),
         "card": (f"={ref(CARD, '공제 계', 'supply')}", f"={ref(CARD, '공제 계', 'tax')}"),
+        "deemed": (f"={ref(EXEMPT, result.profile.exempt_label, 'supply')}", None),
         "nondeductible": (f"={ref(NONDEDUCTIBLE, '불공', 'supply')}", f"={ref(NONDEDUCTIBLE, '불공', 'tax')}"),
         "purchase": (
-            f"={s('invoice')}+{s('deemed')}+{s('card')}-{s('nondeductible')}-{s('extra_nondeductible')}-{s('common')}",
-            f"={t('invoice')}+{t('deemed')}+{t('card')}-{t('nondeductible')}-{t('extra_nondeductible')}-{t('common')}",
+            f"={s('invoice')}+{s('card')}+{s('deemed')}-{s('nondeductible')}-{s('extra_nondeductible')}-{s('common')}",
+            f"={t('invoice')}+{t('card')}+{t('deemed')}-{t('nondeductible')}-{t('extra_nondeductible')}-{t('common')}",
         ),
         "sales_invoice": (f"={ref(SALES, '계', 'supply')}", f"=ROUNDDOWN({s('sales_invoice')}*0.1,0)"),
         "zero_rated": (f"={ref(SALES, '영세', 'supply')}", 0),
@@ -307,15 +313,11 @@ def _render_summary(
                 out.write(row, column, label if column == label_column else None, bold=True, fill=SECTION_FILL)
             continue
         out.write(row, label_column, label, bold=key in {"purchase", "taxable", "final", "payable"})
-        if kind in {"formula", "prefill_tax"}:
-            supply_value, tax_value = formulas[key]
-            out.write(row, supply_column, supply_value, number=True)
-            out.write(row, tax_column, tax_value, number=True, fill=INPUT_FILL if kind == "prefill_tax" else None)
-        else:
-            supply_fill = INPUT_FILL if kind in {"input1", "input2"} else None
-            tax_fill = INPUT_FILL if kind in {"input2", "input_tax"} else None
-            out.write(row, supply_column, None, number=True, fill=supply_fill)
-            out.write(row, tax_column, None, number=True, fill=tax_fill)
+        supply_value, tax_value = formulas[key] if kind == "formula" or kind.startswith("prefill") else (None, None)
+        supply_fill = INPUT_FILL if kind in {"input1", "input2", "prefill_supply"} else None
+        tax_fill = INPUT_FILL if kind in {"input2", "input_tax", "prefill_supply", "prefill_tax"} else None
+        out.write(row, supply_column, supply_value, number=True, fill=supply_fill)
+        out.write(row, tax_column, tax_value, number=True, fill=tax_fill)
 
 
 def _build_summary_sheet(workbook: Workbook, result: ProcessingResult) -> None:
