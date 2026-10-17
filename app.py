@@ -20,6 +20,7 @@ from tally import (
 from tally.core import BLOCK_TITLES, cell_total
 
 PROCESSING_ERRORS = (InputWorkbookError, OSError, ValueError, KeyError)
+SETTINGS_PATH = Path(__file__).resolve().parent / "data" / "companies.json"
 
 
 def _error_text(exc: Exception) -> str:
@@ -131,7 +132,7 @@ class TallyApp(tk.Tk):
         self.geometry("1280x860")
         self.minsize(1000, 640)
 
-        self.store = SettingsStore()
+        self.store = SettingsStore(SETTINGS_PATH)
         self.source_data: pd.DataFrame | None = None
         self.result = None
         self.result_settings: CompanySettings | None = None

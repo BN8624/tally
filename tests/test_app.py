@@ -1,6 +1,8 @@
-# 앱이 오류를 대화상자로 바꾸고, 처리 결과를 파일·업체·설정에 묶어 기간 변경과 저장을 관리하는지 검증합니다.
+# 앱이 오류를 대화상자로 바꾸고, 업체 설정 파일을 앱 폴더에 두며, 처리 결과를 파일·업체·설정에 묶어 기간 변경과 저장을 관리하는지 검증합니다.
 from datetime import date
 from decimal import Decimal
+import importlib
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -108,6 +110,13 @@ def _source() -> pd.DataFrame:
 def test_error_text_strips_key_error_quoting() -> None:
     assert tally_app._error_text(KeyError("업체 설정을 찾을 수 없습니다. 업체명=없음")) == "업체 설정을 찾을 수 없습니다. 업체명=없음"
     assert tally_app._error_text(ValueError("금액 형식 오류")) == "금액 형식 오류"
+
+
+def test_settings_file_stays_in_app_folder_whatever_the_working_directory(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    reloaded = importlib.reload(tally_app)
+    assert reloaded.SETTINGS_PATH == Path(reloaded.__file__).resolve().parent / "data" / "companies.json"
+    assert tmp_path not in reloaded.SETTINGS_PATH.parents
 
 
 @pytest.mark.parametrize(
