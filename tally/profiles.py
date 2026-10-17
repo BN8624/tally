@@ -16,6 +16,8 @@ class Profile:
     purchase_columns: tuple[str, ...]
     first_label: str
     first_codes: frozenset[str]
+    exempt_label: str
+    exempt_codes: frozenset[str]
     contractor_label: str | None
     card_columns: tuple[str, ...]
     payment_columns: tuple[str, ...]
@@ -26,7 +28,7 @@ class Profile:
 
     @property
     def exempt_columns(self) -> tuple[str, ...]:
-        return (self.first_label, "기타")
+        return (self.exempt_label, "기타")
 
     def purchase_column(self, code: str, fixed_codes: set[str], overrides: dict[str, str]) -> tuple[str, str]:
         """세금계산서 매입의 열과, 틀에 없는 예외로 기타에 넣었다면 그 설명을 돌려줍니다."""
@@ -50,8 +52,8 @@ class Profile:
 
     def exempt_column(self, code: str, overrides: dict[str, str]) -> str:
         code = str(code).strip()
-        if overrides.get(code) == self.first_label or code in self.first_codes:
-            return self.first_label
+        if overrides.get(code) == self.exempt_label or code in self.exempt_codes:
+            return self.exempt_label
         if not (len(code) == 3 and code.isdigit()):
             return "미분류"
         return "기타"
@@ -88,6 +90,8 @@ PROFILES: dict[str, Profile] = {
         purchase_columns=("원재료", "고정", "기타"),
         first_label="원재료",
         first_codes=frozenset({"146", "153", "156"}),
+        exempt_label="원재료",
+        exempt_codes=frozenset({"146", "153", "156"}),
         contractor_label=None,
         card_columns=("카과", "카면", "현과", "현면"),
         payment_columns=(*TAXABLE_PAYMENT_DEFAULT, "현금", *EXEMPT_PAYMENT),
@@ -97,21 +101,25 @@ PROFILES: dict[str, Profile] = {
     ),
     "건설": Profile(
         name="건설",
-        purchase_columns=("원재료", "도급", "고정", "기타"),
-        first_label="원재료",
+        purchase_columns=("원재료(도급)", "도급", "고정", "기타"),
+        first_label="원재료(도급)",
         first_codes=frozenset({"156"}),
+        exempt_label="원재료",
+        exempt_codes=frozenset({"153"}),
         contractor_label="도급",
         card_columns=("카드", "현영"),
         payment_columns=(),
         channels=(),
         sales_exempt_fixed=False,
-        inputs=frozenset(),
+        inputs=frozenset({INPUT_DEEMED, INPUT_COMMON}),
     ),
     "도소매": Profile(
         name="도소매",
         purchase_columns=("상품", "고정", "기타"),
         first_label="상품",
         first_codes=frozenset({"146"}),
+        exempt_label="상품",
+        exempt_codes=frozenset({"146"}),
         contractor_label=None,
         card_columns=("카드상품", "카드기타", "현영상품", "현영기타"),
         payment_columns=("카드", "현영", "오픈마켓", "제로페이", "현금", *EXEMPT_PAYMENT),
@@ -126,6 +134,8 @@ PROFILES: dict[str, Profile] = {
         purchase_columns=("음식재료", "고정", "기타"),
         first_label="음식재료",
         first_codes=frozenset({"146"}),
+        exempt_label="음식재료",
+        exempt_codes=frozenset({"146"}),
         contractor_label=None,
         card_columns=("카과", "카면", "현과", "현면"),
         payment_columns=("카드", "현영", "배민", "요기요", "쿠팡이츠", "제로페이", "현금"),

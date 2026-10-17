@@ -74,7 +74,7 @@ def canon_example_rows():
     ]
 
 
-def test_construction_purchase_columns_follow_canon_rules() -> None:
+def test_construction_purchase_and_exempt_columns_follow_canon_rules() -> None:
     result = process(
         [
             transaction(1, "매입", "과세", 100, 10, code="156"),
@@ -83,11 +83,15 @@ def test_construction_purchase_columns_follow_canon_rules() -> None:
             transaction(4, "매입", "과세", 100, 10, code="146"),
             transaction(5, "매입", "과세", 100, 10, code="813"),
             transaction(6, "매입", "과세", 100, 10, code=""),
+            transaction(7, "매입", "면세", 300, 0, code="153"),
+            transaction(8, "매입", "면세", 300, 0, code="156"),
+            transaction(9, "매입", "의제", 300, 0, code="146"),
         ],
         industry="건설",
     )
-    assert labels(result, PURCHASE) == ["원재료", "도급", "고정", "기타", "미분류", "계"]
-    assert list(columns_of(result).values()) == ["원재료", "도급", "고정", "기타", "기타", "미분류"]
+    assert labels(result, PURCHASE) == ["원재료(도급)", "도급", "고정", "기타", "미분류", "계"]
+    assert labels(result, EXEMPT) == ["원재료", "기타", "면세 계"]
+    assert list(columns_of(result).values()) == ["원재료(도급)", "도급", "고정", "기타", "기타", "미분류", "원재료", "기타", "기타"]
     assert check(result, "계정 미분류 건수")["status"] == "실패"
     assert not result.validation_passed
 
@@ -286,12 +290,17 @@ def test_exempt_and_zero_rated_purchases_go_to_exempt_block() -> None:
 
 def test_override_outside_profile_goes_to_other_with_note() -> None:
     result = process(
-        [transaction(1, "매입", "과세", 100, 10, code="899"), transaction(2, "매입", "과세", 100, 10, code="146")],
+        [
+            transaction(1, "매입", "과세", 100, 10, code="899"),
+            transaction(2, "매입", "과세", 100, 10, code="146"),
+            transaction(3, "매입", "과세", 100, 10, code="157"),
+            transaction(4, "매입", "면세", 100, 0, code="157"),
+        ],
         industry="건설",
-        account_overrides={"899": "도급", "146": "운송경비"},
+        account_overrides={"899": "도급", "146": "운송경비", "157": "원재료"},
     )
-    assert list(columns_of(result).values()) == ["도급", "기타"]
-    assert check(result, "틀에 없어 기타로 넣은 계정 예외")["detail"] == "146=운송경비"
+    assert list(columns_of(result).values()) == ["도급", "기타", "기타", "원재료"]
+    assert check(result, "틀에 없어 기타로 넣은 계정 예외")["detail"] == "146=운송경비, 157=원재료"
 
 
 def test_candidates_are_listed_without_changing_aggregates() -> None:
