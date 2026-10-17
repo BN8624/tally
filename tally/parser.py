@@ -42,6 +42,7 @@ HEADER_ALIASES = {
     "계정과목": {"계정과목"},
     "카드사명": {"카드사명"},
     "카드번호": {"카드번호"},
+    "전자세금": {"전자세금"},
 }
 
 AGGREGATE_CAPTION_ENDINGS = ("월계", "누계", "합계", "총계", "소계")
@@ -63,6 +64,7 @@ OUTPUT_COLUMNS = (
     "account_name",
     "card_company",
     "card_number",
+    "electronic",
 )
 
 
@@ -284,7 +286,14 @@ def parse_workbook(source: str | Path | BinaryIO) -> pd.DataFrame:
                 "account_name": _clean_text(row[columns["계정과목"]]),
                 "card_company": _clean_text(row[columns["카드사명"]]),
                 "card_number": _clean_text(row[columns["카드번호"]]),
+                "electronic": _electronic_flag(row, columns),
             }
         )
     return pd.DataFrame(transactions, columns=OUTPUT_COLUMNS)
+
+
+def _electronic_flag(row: tuple[object, ...], columns: dict[str, int]) -> str:
+    if "전자세금" not in columns:
+        return ""
+    return "전자" if _clean_text(row[columns["전자세금"]]).startswith("전자") else "종이"
 

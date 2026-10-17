@@ -167,6 +167,21 @@ def test_stops_when_more_than_one_sheet_has_a_ledger_header() -> None:
     assert "하반기" in str(error.value)
 
 
+def test_reads_optional_electronic_invoice_column() -> None:
+    headers = ["구분", "전표일자", "거래처", "품명", "공급가액", "부가세", "합계", "전자세금", "매입/매출\n유형", "Code", "계정과목", "카드사명", "카드번호"]
+    source = workbook_bytes(
+        [
+            ["매입", "2026-07-01", "상사", "재료", 1000, 100, 1100, "전자입력", "51.과세", "146", "상품", "", ""],
+            ["매입", "2026-07-02", "상사", "재료", 500, 50, 550, "", "51.과세", "146", "상품", "", ""],
+        ],
+        headers=headers,
+    )
+    assert parse_workbook(source)["electronic"].tolist() == ["전자", "종이"]
+    assert parse_workbook(workbook_bytes([["매입", "2026-07-01", "상사", "재료", 1000, 100, 1100, "51.과세", "146", "상품"]]))[
+        "electronic"
+    ].tolist() == [""]
+
+
 def test_rejects_malformed_amount_without_guessing() -> None:
     source = workbook_bytes(
         [["매입", "2026-04-01", "상사", "재료", "천원", 100, 1100, "51.과세", "146", "상품", "", "", "", "", ""]]
