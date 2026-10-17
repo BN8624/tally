@@ -33,7 +33,11 @@ SUMMARY_KEYS = {
     "납부(환급)세액": "payable",
     "카드공제": "card_deduction",
     "카드공제(비대상)": "card_deduction",
+    "택시 경감세액": "taxi_relief",
     "차감 납부할 세액": "final",
+    "운수종사자 지급(90%)": "taxi_drivers",
+    "감차 보상(5%)": "taxi_reduction",
+    "운수종사자 복지(4%)": "taxi_welfare",
 }
 
 
@@ -177,6 +181,7 @@ def test_card_exempt_input_moves_mixed_card_sales_to_exempt(tmp_path) -> None:
         ("건설", ["원재료", "도급", "고정", "기타", "계"], False, set()),
         ("도소매", ["상품", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
         ("음식점", ["음식재료", "고정", "기타", "계"], True, {"의제"}),
+        ("택시", ["원재료", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
     ],
 )
 def test_layout_follows_industry_frame(tmp_path, industry, purchase_headers, has_payment, inputs) -> None:
@@ -193,6 +198,7 @@ def test_layout_follows_industry_frame(tmp_path, industry, purchase_headers, has
     optional = {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}
     assert labels & optional == inputs
     assert {"추가 불공", "경감·공제세액", "예정 미환급세액", "예정 고지세액", "매입자 납부특례 기납부세액", "가산세"} <= labels
+    assert ("택시 경감세액" in labels) == (industry == "택시")
     assert workbook.sheetnames == ["집계표", "전자·종이", "불공후보", "거래상세", "미분류", "검산"]
 
 
@@ -203,6 +209,24 @@ def test_input_cells_are_green_and_empty(tmp_path) -> None:
     tax_cell = sheet.cell(row, supply_column + 1)
     assert tax_cell.value is None
     assert tax_cell.fill.fgColor.rgb.endswith("C6EFCE")
+
+
+def test_taxi_relief_is_prefilled_and_allocated_below_summary(tmp_path) -> None:
+    rows = [transaction(1, "매출", "과세", 12345670, 1234567, code="416", name="운송수입")]
+    _, workbook = exported(tmp_path, rows, industry="택시", card_deduction_eligible=False)
+    sheet = workbook["집계표"]
+    cells = summary_cells(sheet)
+    relief_row, supply_column = cells["택시 경감세액"]
+    relief_cell = sheet.cell(relief_row, supply_column + 1)
+    assert relief_cell.value.startswith("=MAX(0,ROUNDDOWN(")
+    assert relief_cell.fill.fgColor.rgb.endswith("C6EFCE")
+    assert summary_value(sheet, "택시 경감세액") == 1222221
+    assert summary_value(sheet, "차감 납부할 세액") == 12346
+    shares = ["운수종사자 지급(90%)", "감차 보상(5%)", "운수종사자 복지(4%)"]
+    assert [summary_value(sheet, label) for label in shares] == [1111111, 61728, 49382]
+    assert min(cells[label][0] for label in shares) > cells["차감 납부할 세액"][0]
+    relief_cell.value = 1000000
+    assert summary_value(sheet, "차감 납부할 세액") == 234567
 
 
 def test_electronic_sheet_splits_invoices(tmp_path) -> None:
@@ -302,7 +326,7 @@ def test_random_ledgers_render_without_overlap_and_formulas_match(monkeypatch) -
             continue
         writes.clear()
         merges.clear()
-        settings = CompanySettings(name="배치검사", industry=rng.choice(["기본", "건설", "도소매", "음식점"]), card_deduction_eligible=rng.random() < 0.5)
+        settings = CompanySettings(name="배치검사", industry=rng.choice(["기본", "건설", "도소매", "음식점", "택시"]), card_deduction_eligible=rng.random() < 0.5)
         result = process_transactions(pd.DataFrame(rows), settings, Period(2026, 2, "예정"))
         workbook = Workbook()
         _build_summary_sheet(workbook, result)

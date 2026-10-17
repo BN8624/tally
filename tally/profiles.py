@@ -1,7 +1,7 @@
 # 업종별 집계표 틀의 열 구성·계정 규칙·결제 채널·입력 칸을 정의합니다.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 TAXABLE_PAYMENT_DEFAULT = ("카드", "현영", "제로페이")
 EXEMPT_PAYMENT = ("카드면세", "현영면세", "면세현금")
@@ -22,6 +22,7 @@ class Profile:
     channels: tuple[tuple[str, tuple[str, ...]], ...]
     sales_exempt_fixed: bool
     inputs: frozenset[str]
+    taxi_relief: bool = False
 
     @property
     def exempt_columns(self) -> tuple[str, ...]:
@@ -137,6 +138,8 @@ PROFILES: dict[str, Profile] = {
         inputs=frozenset({INPUT_DEEMED}),
     ),
 }
+# 택시는 기본 틀을 그대로 쓰고 요약에 택시 경감세액과 그 배분만 더합니다.
+PROFILES["택시"] = replace(PROFILES["기본"], name="택시", taxi_relief=True)
 
 INDUSTRIES = tuple(PROFILES)
 

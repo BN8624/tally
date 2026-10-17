@@ -205,6 +205,10 @@ def _summary_rows(result: ProcessingResult) -> list[tuple[str, str, str]]:
         ("section", "납부", ""),
         ("payable", "납부(환급)세액", "formula"),
         ("card_deduction", "카드공제" if result.settings.card_deduction_eligible else "카드공제(비대상)", "formula"),
+    ]
+    if result.profile.taxi_relief:
+        rows.append(("taxi_relief", "택시 경감세액", "prefill_tax"))
+    rows += [
         ("relief", "경감·공제세액", "input_tax"),
         ("prior_refund", "예정 미환급세액", "input_tax"),
         ("prior_notice", "예정 고지세액", "input_tax"),
@@ -212,6 +216,13 @@ def _summary_rows(result: ProcessingResult) -> list[tuple[str, str, str]]:
         ("penalty", "가산세", "input_tax"),
         ("final", "차감 납부할 세액", "formula"),
     ]
+    if result.profile.taxi_relief:
+        rows += [
+            ("section", "택시 경감 배분", ""),
+            ("taxi_drivers", "운수종사자 지급(90%)", "formula"),
+            ("taxi_reduction", "감차 보상(5%)", "formula"),
+            ("taxi_welfare", "운수종사자 복지(4%)", "formula"),
+        ]
     return rows
 
 
@@ -274,10 +285,20 @@ def _render_summary(
             if result.settings.card_deduction_eligible
             else 0,
         ),
+        "taxi_relief": (None, f"=MAX(0,ROUNDDOWN({t('payable')}*0.99,0))"),
         "final": (
             None,
-            f"={t('payable')}-{t('card_deduction')}-{t('relief')}-{t('prior_refund')}-{t('prior_notice')}-{t('buyer_paid')}+{t('penalty')}",
+            f"={t('payable')}"
+            + "".join(
+                f"-{t(key)}"
+                for key in ("card_deduction", "taxi_relief", "relief", "prior_refund", "prior_notice", "buyer_paid")
+                if key in row_of
+            )
+            + f"+{t('penalty')}",
         ),
+        "taxi_drivers": (None, f"=MAX(0,ROUNDUP({t('payable')}*0.9,0))"),
+        "taxi_reduction": (None, f"=MAX(0,ROUNDDOWN({t('payable')}*0.05,0))"),
+        "taxi_welfare": (None, f"=MAX(0,ROUNDDOWN({t('payable')}*0.04,0))"),
     }
     for offset, (key, label, kind) in enumerate(specs, start=1):
         row = top + offset
@@ -286,10 +307,10 @@ def _render_summary(
                 out.write(row, column, label if column == label_column else None, bold=True, fill=SECTION_FILL)
             continue
         out.write(row, label_column, label, bold=key in {"purchase", "taxable", "final", "payable"})
-        if kind == "formula":
+        if kind in {"formula", "prefill_tax"}:
             supply_value, tax_value = formulas[key]
             out.write(row, supply_column, supply_value, number=True)
-            out.write(row, tax_column, tax_value, number=True)
+            out.write(row, tax_column, tax_value, number=True, fill=INPUT_FILL if kind == "prefill_tax" else None)
         else:
             supply_fill = INPUT_FILL if kind in {"input1", "input2"} else None
             tax_fill = INPUT_FILL if kind in {"input2", "input_tax"} else None

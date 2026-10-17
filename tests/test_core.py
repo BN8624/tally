@@ -189,6 +189,34 @@ def test_card_deduction_is_capped_by_payable(purchase_supply, eligible, payable,
     assert (result.summary_value("payable"), result.summary_value("card_deduction")) == (payable, deduction)
 
 
+@pytest.mark.parametrize(
+    ("rows", "payable", "relief", "shares", "final"),
+    [
+        ([transaction(1, "매출", "과세", 12345670, 1234567, code="416", name="운송수입")], 1234567, 1222221, (1111111, 61728, 49382), 12346),
+        (canon_example_rows(), 420, 415, (378, 21, 16), 5),
+        (
+            [
+                transaction(1, "매입", "과세", 10000000, 1000000, code="522", name="차량유지비"),
+                transaction(2, "매출", "과세", 1000000, 100000, code="416", name="운송수입"),
+            ],
+            -900000,
+            0,
+            (0, 0, 0),
+            -900000,
+        ),
+    ],
+)
+def test_taxi_relief_and_allocation_follow_payable(rows, payable, relief, shares, final) -> None:
+    result = process(rows, industry="택시", card_deduction_eligible=False)
+    basic = process(rows, card_deduction_eligible=False)
+    assert result.layout == basic.layout
+    assert result.summary_value("payable") == payable
+    assert result.summary_value("taxi_relief") == relief
+    assert tuple(result.summary_value(key) for key in ("taxi_drivers", "taxi_reduction", "taxi_welfare")) == shares
+    assert result.summary_value("final") == final
+    assert not {"taxi_relief", "taxi_drivers"} & {row.key for row in basic.summary}
+
+
 def test_other_sales_are_reversed_from_total_amount() -> None:
     result = process(
         [

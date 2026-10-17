@@ -310,7 +310,9 @@ def cell_total(cells: pd.DataFrame, block: str, labels: Iterable[str], field_nam
     return Decimal(int(total)) if total == total.to_integral_value() else total
 
 
-def _summary(cells: pd.DataFrame, layout: dict[str, list[Column]], settings: CompanySettings) -> list[SummaryRow]:
+def _summary(
+    cells: pd.DataFrame, layout: dict[str, list[Column]], settings: CompanySettings, profile: Profile
+) -> list[SummaryRow]:
     def data_labels(block: str, kind: str | None = None) -> list[str]:
         return [column.label for column in layout.get(block, []) if not column.sum_of and (kind is None or column.kind == kind)]
 
@@ -351,7 +353,8 @@ def _summary(cells: pd.DataFrame, layout: dict[str, list[Column]], settings: Com
         if settings.card_deduction_eligible
         else ZERO
     )
-    return [
+    taxi_relief = max(ZERO, d0(payable * Decimal("0.99"))) if profile.taxi_relief else ZERO
+    rows = [
         SummaryRow("general", "일반", invoice_supply - fixed_supply, invoice_tax - fixed_tax),
         SummaryRow("fixed", "고정", fixed_supply, fixed_tax),
         SummaryRow("invoice", "세금계산서 계", invoice_supply, invoice_tax),
@@ -369,8 +372,17 @@ def _summary(cells: pd.DataFrame, layout: dict[str, list[Column]], settings: Com
         SummaryRow("total_sales", "총매출", taxable_supply + exempt_total, None),
         SummaryRow("payable", "납부(환급)세액", None, payable),
         SummaryRow("card_deduction", "카드공제", None, card_deduction),
-        SummaryRow("final", "차감 납부할 세액", None, payable - card_deduction),
     ]
+    if profile.taxi_relief:
+        rows.append(SummaryRow("taxi_relief", "택시 경감세액", None, taxi_relief))
+    rows.append(SummaryRow("final", "차감 납부할 세액", None, payable - card_deduction - taxi_relief))
+    if profile.taxi_relief:
+        rows += [
+            SummaryRow("taxi_drivers", "운수종사자 지급(90%)", None, max(ZERO, u0(payable * Decimal("0.9")))),
+            SummaryRow("taxi_reduction", "감차 보상(5%)", None, max(ZERO, d0(payable * Decimal("0.05")))),
+            SummaryRow("taxi_welfare", "운수종사자 복지(4%)", None, max(ZERO, d0(payable * Decimal("0.04")))),
+        ]
+    return rows
 
 
 def _validation_row(check: str, expected: object, actual: object, *, detail: str = "") -> dict[str, object]:
@@ -426,7 +438,7 @@ def process_transactions(
     )
     layout, added = _build_layout(placed, profile)
     cells = _aggregate(pd.concat([placed, nondeductible], ignore_index=True))
-    summary = _summary(cells, layout, settings)
+    summary = _summary(cells, layout, settings, profile)
 
     in_period = data[data["in_period"]]
     unsupported = in_period[in_period["block"].eq("")]
