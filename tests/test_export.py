@@ -1,4 +1,4 @@
-# 결과 엑셀의 필수 시트와 핵심 집계 셀 및 수식을 검증합니다.
+# 집계표 틀 배치, 요약 수식 계산값, 입력 칸 반영, 전자·종이 시트, 셀 충돌을 검증합니다.
 from datetime import date
 from decimal import Decimal
 import math
@@ -11,8 +11,30 @@ from openpyxl.worksheet.worksheet import Worksheet
 import pandas as pd
 import pytest
 
-from tally import CompanySettings, export_workbook, process_transactions
-from tally.export import _build_summary
+from tally import CompanySettings, Period, export_workbook, process_transactions
+from tally.export import _build_summary_sheet
+
+SUMMARY_KEYS = {
+    "일반": "general",
+    "고정": "fixed",
+    "세금계산서 계": "invoice",
+    "카드": "card",
+    "불공": "nondeductible",
+    "매입계": "purchase",
+    "세금계산서": "sales_invoice",
+    "영세": "zero_rated",
+    "카드외": "card_out",
+    "기타(건별)": "other",
+    "과세계": "taxable",
+    "면세 계산서": "exempt_invoice",
+    "면세 결제": "exempt_payment",
+    "면세계": "exempt",
+    "총매출": "total_sales",
+    "납부(환급)세액": "payable",
+    "카드공제": "card_deduction",
+    "카드공제(비대상)": "card_deduction",
+    "차감 납부할 세액": "final",
+}
 
 
 def _excel_round(value: float) -> float:
@@ -26,15 +48,12 @@ def _formula_value(sheet, reference: str) -> float:
 
     def expand_sum(match: re.Match) -> str:
         min_col, min_row, max_col, max_row = range_boundaries(match.group(1))
-        cells = [
-            f"{get_column_letter(column)}{row}"
-            for row in range(min_row, max_row + 1)
-            for column in range(min_col, max_col + 1)
-        ]
-        return "(" + "+".join(cells) + ")"
+        return "(" + "+".join(
+            f"{get_column_letter(column)}{row}" for row in range(min_row, max_row + 1) for column in range(min_col, max_col + 1)
+        ) + ")"
 
     expression = re.sub(r"SUM\(([A-Z]+\d+:[A-Z]+\d+)\)", expand_sum, cell.value[1:])
-    expression = re.sub(r"\b([A-Z]{1,2}\d+)\b", r'V("\1")', expression)
+    expression = re.sub(r"(?<![A-Za-z\"])([A-Z]{1,3}\d+)(?![\w\"])", r'V("\1")', expression)
     return eval(
         expression,
         {
@@ -47,29 +66,14 @@ def _formula_value(sheet, reference: str) -> float:
     )
 
 
-def _labelled_value(sheet, label: str) -> float:
-    cell = next(cell for row in sheet.iter_rows() for cell in row if cell.value == label)
-    return _formula_value(sheet, f"{get_column_letter(cell.column + 1)}{cell.row}")
-
-
-def _detail_row(
-    number: int,
-    division: str,
-    original_type: str,
-    supply: int,
-    tax: int,
-    *,
-    vendor: str = "거래처",
-    code: str = "",
-    account_name: str = "",
-) -> dict[str, object]:
+def transaction(number, division, original_type, supply, tax, *, code="", name="", vendor="거래처", month=7, electronic=""):
     return {
         "row_id": f"Sheet1:{number}",
         "sheet": "Sheet1",
         "source_row": number,
         "division": division,
-        "date": date(2026, 4, 1),
-        "month": "2026-04",
+        "date": date(2026, month, 1),
+        "month": f"2026-{month:02d}",
         "vendor": vendor,
         "item": "품목",
         "supply_amount": Decimal(supply),
@@ -77,165 +81,203 @@ def _detail_row(
         "total_amount": Decimal(supply + tax),
         "original_type": original_type,
         "account_code": code,
-        "account_name": account_name,
+        "account_name": name,
         "card_company": "",
         "card_number": "",
+        "electronic": electronic,
     }
 
 
-def _summary_for(tmp_path, rows: list[dict[str, object]], settings: CompanySettings | None = None):
-    settings = settings or CompanySettings(name="검증상사")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "summary.xlsx")
-    return load_workbook(output, data_only=False)["집계표"]
-
-
-def test_tobacco_layout_does_not_overwrite_purchase_summary(tmp_path) -> None:
-    summary = _summary_for(
-        tmp_path,
-        [
-            _detail_row(1, "매입", "과세", 1000, 100, vendor="KT&G", code="146", account_name="상품"),
-            _detail_row(2, "매입", "카과", 1000, 100),
-            _detail_row(3, "매입", "현과", 1000, 100),
-            _detail_row(4, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
-        ],
-    )
-    assert _labelled_value(summary, "카드외") in (2000, 200)
-    assert _labelled_value(summary, "납부") == -100
-
-
-def test_three_purchase_detail_tables_keep_payment_inputs(tmp_path) -> None:
-    summary = _summary_for(
-        tmp_path,
-        [
-            _detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
-            _detail_row(2, "매입", "과세", 1000, 100, vendor="KT&G", code="146", account_name="상품"),
-            _detail_row(3, "매입", "카과", 1000, 100),
-            _detail_row(4, "매입", "현과", 1000, 100),
-            _detail_row(5, "매입", "면세", 500, 0),
-            _detail_row(6, "매출", "과세", 5000, 500, code="401", account_name="상품매출"),
-        ],
-    )
-    assert _labelled_value(summary, "납부") == 100
-
-
-def test_payment_is_calculated_without_invoice_purchase(tmp_path) -> None:
-    summary = _summary_for(
-        tmp_path,
-        [
-            _detail_row(1, "매입", "카과", 1000, 100),
-            _detail_row(2, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
-        ],
-        CompanySettings(name="검증상사", prior_period_credit=10),
-    )
-    assert _labelled_value(summary, "납부") == 100
-    assert _labelled_value(summary, "차감") == 90
-
-
-def test_payment_is_calculated_without_taxable_sales(tmp_path) -> None:
-    summary = _summary_for(
-        tmp_path,
-        [
-            _detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
-            _detail_row(2, "매출", "면세", 500, 0, code="401", account_name="상품매출"),
-        ],
-        CompanySettings(name="검증상사", prior_period_credit=10),
-    )
-    assert _labelled_value(summary, "납부") == -100
-    assert _labelled_value(summary, "차감") == -110
-
-
-@pytest.mark.parametrize(
-    ("purchase_supply", "eligible", "expected"),
-    [
-        (1000, True, {"납부": 1100, "카드공제": 171, "차감": 929}),
-        (10000, True, {"납부": 200, "카드공제": 171, "차감": 29}),
-        (11000, True, {"납부": 100, "카드공제": 100, "차감": 0}),
-        (20000, True, {"납부": -800, "카드공제": 0, "차감": -800}),
-        (1000, False, {"납부": 1100}),
-    ],
-)
-def test_card_sales_deduction_is_13_per_1000_capped_by_payable(
-    tmp_path, purchase_supply: int, eligible: bool, expected: dict[str, int]
-) -> None:
-    summary = _summary_for(
-        tmp_path,
-        [
-            _detail_row(1, "매입", "과세", purchase_supply, purchase_supply // 10, code="146", account_name="상품"),
-            _detail_row(2, "매출", "카과", 10000, 1000, code="401", account_name="상품매출"),
-            _detail_row(3, "매출", "현과", 1000, 100, code="401", account_name="상품매출"),
-            _detail_row(4, "매출", "카과", 1000, 100, vendor="제로페이", code="401", account_name="상품매출"),
-            _detail_row(5, "매출", "카면", 5000, 0, code="401", account_name="상품매출"),
-        ],
-        CompanySettings(name="검증상사", card_deduction_eligible=eligible),
-    )
-    labels = {cell.value for row in summary.iter_rows() for cell in row if isinstance(cell.value, str)}
-    assert {label: _labelled_value(summary, label) for label in expected} == expected
-    assert {"카드공제", "차감"}.isdisjoint(labels) == (not eligible)
-
-
-def test_other_sales_are_split_back_from_total_amount(tmp_path) -> None:
-    summary = _summary_for(
-        tmp_path,
-        [
-            _detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
-            _detail_row(2, "매출", "건별", 1008420, 100849, code="401", account_name="상품매출"),
-            _detail_row(3, "매출", "건별", -500, -50, code="401", account_name="상품매출"),
-        ],
-    )
-    label = next(cell for row in summary.iter_rows() for cell in row if cell.value == "기타")
-    assert _formula_value(summary, f"C{label.row}") == 1007927
-    assert _formula_value(summary, f"D{label.row}") == 100792
-
-
-def test_print_area_includes_every_sales_account_column(tmp_path) -> None:
-    rows = [_detail_row(1, "매입", "과세", 1000, 100, code="146", account_name="상품")]
-    rows += [
-        _detail_row(10 + index, "매출", "과세", 1000, 100, code="401", account_name=f"매출계정{index}")
-        for index in range(7)
+def canon_example_rows():
+    return [
+        transaction(1, "매입", "과세", 1005, 100, code="146", name="원재료", electronic="전자"),
+        transaction(2, "매입", "불공", 200, 20, code="813", name="접대비", electronic="종이"),
+        transaction(3, "매입", "과세", 1000, 99, code="208", name="비품", electronic="전자"),
+        transaction(4, "매입", "카과", 300, 30, code="830", name="소모품"),
+        transaction(5, "매출", "과세", 3000, 300, code="401", name="상품매출", electronic="전자"),
+        transaction(6, "매출", "카과", 2000, 200, code="401", name="상품매출"),
+        transaction(7, "매출", "현과", 1000, 100, code="401", name="상품매출"),
+        transaction(8, "매출", "건별", 500, 50, code="401", name="상품매출"),
     ]
-    summary = _summary_for(tmp_path, rows)
-    last_column = range_boundaries(summary.print_area.split("!")[1].replace("$", ""))[2]
-    account_columns = [
-        cell.column
-        for row in summary.iter_rows()
-        for cell in row
-        if isinstance(cell.value, str) and cell.value.startswith("매출계정")
-    ]
-    assert len(account_columns) == 7
-    assert max(account_columns) <= last_column
 
 
-def _random_layout_rows(rng: random.Random) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    months = rng.choice([[4], [4, 5, 6], [1, 2, 3, 4, 5, 6]])
+def exported(tmp_path, rows, industry="기본", period=None, **settings):
+    result = process_transactions(pd.DataFrame(rows), CompanySettings(name="검증상사", industry=industry, **settings), period)
+    workbook = load_workbook(export_workbook(result, tmp_path / f"{industry}.xlsx"))
+    return result, workbook
 
-    def add(division: str, original_type: str, supply: int, tax: int, code: str = "", name: str = "", vendor: str = "거래처") -> None:
-        for month in months:
-            row = _detail_row(len(rows) + 1, division, original_type, supply, tax, vendor=vendor, code=code, account_name=name)
-            row["date"] = date(2026, month, 1)
-            row["month"] = f"2026-{month:02d}"
-            rows.append(row)
 
-    purchase_tax = [("146", ""), ("146", "KT&G"), ("156", ""), ("512", ""), ("612", ""), ("813", ""), ("212", ""), ("899", "")]
-    for code, vendor in rng.sample(purchase_tax, rng.randint(0, 5)):
-        add("매입", "과세", 1000, 100, code, "계정", vendor)
-    for original_type, code in (("불공", "813"), ("공통", "813")):
-        if rng.random() < 0.3:
-            add("매입", original_type, 200, 20, code, "계정")
-    for original_type in rng.sample(["카과", "현과", "카면", "카영", "현면", "현영", "의제", "면세", "영세"], rng.randint(0, 5)):
-        add("매입", original_type, 500, 50 if original_type in {"카과", "현과", "의제"} else 0)
-    for index in range(rng.choice([0, 1, 2, 8])):
-        add("매출", "과세", 2000, 200, "401", f"매출{index}")
-    for original_type in rng.sample(["면세", "카과", "카면", "현과", "현면", "건별", "면건", "제로"], rng.randint(0, 5)):
-        if original_type == "제로":
-            add("매출", "카과", 300, 30, "401", "상품매출", vendor="제로페이")
-        else:
-            add("매출", original_type, 700, 70 if original_type in {"카과", "현과", "건별"} else 0, "401", "상품매출")
+def summary_cells(sheet) -> dict[str, tuple[int, int]]:
+    """요약 블록의 항목 이름별 (행, 공급가액 열)을 찾습니다."""
+    anchor = next(cell for row in sheet.iter_rows() for cell in row if cell.value == "요약")
+    rows: dict[str, tuple[int, int]] = {}
+    for row in range(anchor.row + 1, sheet.max_row + 1):
+        label = sheet.cell(row, anchor.column).value
+        if isinstance(label, str) and label not in rows:
+            rows[label] = (row, anchor.column + 1)
     return rows
 
 
-def test_summary_layout_never_overwrites_cells_or_leaves_print_area(monkeypatch) -> None:
+def summary_value(sheet, label: str, field_name: str = "tax") -> float:
+    row, supply_column = summary_cells(sheet)[label]
+    column = supply_column if field_name == "supply" else supply_column + 1
+    return _formula_value(sheet, f"{get_column_letter(column)}{row}")
+
+
+def test_summary_formulas_match_python_summary(tmp_path) -> None:
+    result, workbook = exported(tmp_path, canon_example_rows())
+    sheet = workbook["집계표"]
+    for label, (row, supply_column) in summary_cells(sheet).items():
+        key = SUMMARY_KEYS.get(label)
+        if key is None:
+            continue
+        expected = next(item for item in result.summary if item.key == key)
+        if expected.supply is not None:
+            assert _formula_value(sheet, f"{get_column_letter(supply_column)}{row}") == expected.supply, label
+        if expected.tax is not None:
+            assert _formula_value(sheet, f"{get_column_letter(supply_column + 1)}{row}") == expected.tax, label
+    assert summary_value(sheet, "차감 납부할 세액") == 378
+
+
+def test_input_cells_flow_into_final_amount(tmp_path) -> None:
+    _, workbook = exported(tmp_path, canon_example_rows())
+    sheet = workbook["집계표"]
+    cells = summary_cells(sheet)
+    extra_row, supply_column = cells["추가 불공"]
+    penalty_row, _ = cells["가산세"]
+    tax_letter = get_column_letter(supply_column + 1)
+    sheet[f"{tax_letter}{extra_row}"] = 10
+    sheet[f"{tax_letter}{penalty_row}"] = 5
+    assert summary_value(sheet, "매입계") == 220
+    assert summary_value(sheet, "납부(환급)세액") == 430
+    assert summary_value(sheet, "카드공제") == 42
+    assert summary_value(sheet, "차감 납부할 세액") == 393
+
+
+def test_card_exempt_input_moves_mixed_card_sales_to_exempt(tmp_path) -> None:
+    rows = [
+        transaction(1, "매입", "과세", 1000, 100, code="146"),
+        transaction(2, "매출", "카과", 2000, 200),
+        transaction(3, "매출", "현과", 1000, 100),
+    ]
+    _, workbook = exported(tmp_path, rows, industry="도소매")
+    sheet = workbook["집계표"]
+    row, supply_column = summary_cells(sheet)["카드매출 면세분(합계금액)"]
+    sheet[f"{get_column_letter(supply_column)}{row}"] = 1100
+    assert summary_value(sheet, "카드외", "supply") == 2000
+    assert summary_value(sheet, "카드외") == 200
+    assert summary_value(sheet, "면세계", "supply") == 1100
+    assert summary_value(sheet, "카드공제") == 28
+
+
+@pytest.mark.parametrize(
+    ("industry", "purchase_headers", "has_payment", "inputs"),
+    [
+        ("기본", ["원재료", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
+        ("건설", ["원재료", "도급", "고정", "기타", "계"], False, set()),
+        ("도소매", ["상품", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
+        ("음식점", ["음식재료", "고정", "기타", "계"], True, {"의제"}),
+    ],
+)
+def test_layout_follows_industry_frame(tmp_path, industry, purchase_headers, has_payment, inputs) -> None:
+    rows = [transaction(1, "매입", "과세", 1000, 100, code="146", month=8), transaction(2, "매출", "과세", 2000, 200, code="401", name="상품매출")]
+    result, workbook = exported(tmp_path, rows, industry=industry)
+    sheet = workbook["집계표"]
+    assert sheet["A3"].value == "매입 세금계산서"
+    headers = [sheet.cell(3, column).value for column in range(2, 20) if sheet.cell(3, column).value]
+    assert headers[: len(purchase_headers)] == purchase_headers
+    assert [sheet.cell(row, 1).value for row in range(4, 8)] == ["7월", "8월", "9월", "계"]
+    titles = {sheet.cell(row, 1).value for row in range(1, sheet.max_row + 1)}
+    assert ("결제 채널 매출" in titles) == has_payment
+    labels = set(summary_cells(sheet))
+    optional = {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}
+    assert labels & optional == inputs
+    assert {"추가 불공", "경감·공제세액", "예정 미환급세액", "예정 고지세액", "매입자 납부특례 기납부세액", "가산세"} <= labels
+    assert workbook.sheetnames == ["집계표", "전자·종이", "불공후보", "거래상세", "미분류", "검산"]
+
+
+def test_input_cells_are_green_and_empty(tmp_path) -> None:
+    _, workbook = exported(tmp_path, canon_example_rows())
+    sheet = workbook["집계표"]
+    row, supply_column = summary_cells(sheet)["예정 미환급세액"]
+    tax_cell = sheet.cell(row, supply_column + 1)
+    assert tax_cell.value is None
+    assert tax_cell.fill.fgColor.rgb.endswith("C6EFCE")
+
+
+def test_electronic_sheet_splits_invoices(tmp_path) -> None:
+    rows = [
+        transaction(1, "매입", "과세", 1000, 100, code="146", electronic="전자"),
+        transaction(2, "매입", "과세", 500, 50, code="146", electronic="종이"),
+    ]
+    _, workbook = exported(tmp_path, rows)
+    sheet = workbook["전자·종이"]
+    headers = {sheet.cell(3, column).value: column for column in range(2, 30) if sheet.cell(3, column).value}
+    electronic, paper = headers["원재료 전자"], headers["원재료 종이"]
+    assert _formula_value(sheet, f"{get_column_letter(electronic + 1)}7") == 1000
+    assert _formula_value(sheet, f"{get_column_letter(paper + 1)}7") == 500
+    assert _formula_value(workbook["집계표"], "L7") == 1500
+
+    _, without = exported(tmp_path, [transaction(1, "매입", "과세", 1000, 100, code="146")])
+    assert "전자세금 열이 없어" in without["전자·종이"]["A3"].value
+
+
+def test_extra_payment_block_feeds_card_out_for_construction(tmp_path) -> None:
+    rows = [transaction(1, "매출", "과세", 1000, 100, code="404", name="공사수입금"), transaction(2, "매출", "카과", 2000, 200)]
+    _, workbook = exported(tmp_path, rows, industry="건설")
+    sheet = workbook["집계표"]
+    assert "결제 채널 매출" in {sheet.cell(row, 1).value for row in range(1, sheet.max_row + 1)}
+    assert summary_value(sheet, "카드외", "supply") == 2000
+
+
+def test_text_starting_with_equals_is_not_saved_as_formula(tmp_path) -> None:
+    rows = [
+        transaction(1, "매입", "과세", 1000, 100, code="146", vendor="=1+2"),
+        transaction(2, "매출", "과세", 2000, 200, code="401", name="=매출"),
+    ]
+    result = process_transactions(pd.DataFrame(rows), CompanySettings(name="=업체"))
+    workbook = load_workbook(export_workbook(result, tmp_path / "text.xlsx"))
+    found = {
+        cell.value: cell.data_type
+        for sheet in workbook.worksheets
+        for row in sheet.iter_rows()
+        for cell in row
+        if cell.value in {"=1+2", "=매출", "=업체"}
+    }
+    assert set(found) == {"=1+2", "=매출", "=업체"}
+    assert set(found.values()) == {"s"}
+
+
+def test_print_area_covers_summary_and_is_landscape(tmp_path) -> None:
+    _, workbook = exported(tmp_path, canon_example_rows())
+    sheet = workbook["집계표"]
+    _, _, last_column, last_row = range_boundaries(sheet.print_area.split("!")[1].replace("$", ""))
+    anchor = next(cell for row in sheet.iter_rows() for cell in row if cell.value == "요약")
+    assert last_column >= anchor.column + 2
+    assert last_row >= max(row for row, _ in summary_cells(sheet).values())
+    assert sheet.page_setup.orientation == "landscape"
+    assert sheet.page_setup.fitToWidth == 1
+
+
+def _random_rows(rng: random.Random) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+
+    def add(division, original_type, supply, tax, code="", name="", vendor="거래처"):
+        month = rng.choice([7, 8, 9])
+        rows.append(transaction(len(rows) + 1, division, original_type, supply, tax, code=code, name=name, vendor=vendor, month=month, electronic=rng.choice(["전자", "종이"])))
+
+    for _ in range(rng.randint(0, 8)):
+        add("매입", rng.choice(["과세", "과세", "불공", "공통"]), rng.randint(-50, 900) * 10 + rng.randint(0, 9), rng.randint(0, 90), code=rng.choice(["146", "153", "156", "208", "512", "612", "813", "899", "", "4X"]))
+    for original_type in rng.sample(["면세", "의제", "영세", "카과", "현과", "카면", "카영", "현면", "현영"], rng.randint(0, 6)):
+        add("매입", original_type, rng.randint(1, 900), 0 if original_type not in {"카과", "현과"} else rng.randint(0, 90), code=rng.choice(["146", "830"]))
+    for _ in range(rng.randint(0, 4)):
+        add("매출", "과세", rng.randint(1, 9000), rng.randint(0, 900), code=rng.choice(["401", "404", "208"]), name=rng.choice(["상품매출", "제품매출", "차량운반구"]))
+    for original_type in rng.sample(["영세", "면세", "카과", "카과", "현과", "건별", "카면", "카영", "현면", "현영", "면건"], rng.randint(0, 7)):
+        add("매출", original_type, rng.randint(1, 9000), rng.randint(0, 900), code="401", name="상품매출", vendor=rng.choice(["거래처", "제로페이", "우아한형제들", "쿠팡"]))
+    return rows
+
+
+def test_random_ledgers_render_without_overlap_and_formulas_match(monkeypatch) -> None:
     writes: dict[tuple[int, int], list[object]] = {}
     merges: list[tuple[int, int, int, int]] = []
     original_cell = Worksheet.cell
@@ -253,24 +295,20 @@ def test_summary_layout_never_overwrites_cells_or_leaves_print_area(monkeypatch)
 
     monkeypatch.setattr(Worksheet, "cell", recording_cell)
     monkeypatch.setattr(Worksheet, "merge_cells", recording_merge)
-    for seed in range(30):
-        rows = _random_layout_rows(random.Random(seed))
+    for seed in range(40):
+        rng = random.Random(seed)
+        rows = _random_rows(rng)
         if not rows:
             continue
         writes.clear()
         merges.clear()
-        settings = CompanySettings(
-            name="배치검사",
-            fixed_asset_codes={"212"},
-            account_overrides={"899": "운송경비"},
-            card_deduction_eligible=bool(seed % 2),
-            prior_period_credit=seed % 3 * 10,
-        )
+        settings = CompanySettings(name="배치검사", industry=rng.choice(["기본", "건설", "도소매", "음식점"]), card_deduction_eligible=rng.random() < 0.5)
+        result = process_transactions(pd.DataFrame(rows), settings, Period(2026, 2, "예정"))
         workbook = Workbook()
-        _build_summary(workbook, process_transactions(pd.DataFrame(rows), settings), settings)
+        _build_summary_sheet(workbook, result)
         sheet = workbook["집계표"]
 
-        overwritten = [key for key, values in writes.items() if len({str(value) for value in values}) > 1]
+        overwritten = [key for key, values in writes.items() if len(values) > 1]
         merged_away = [
             key
             for key in writes
@@ -280,715 +318,11 @@ def test_summary_layout_never_overwrites_cells_or_leaves_print_area(monkeypatch)
         _, _, last_column, last_row = range_boundaries(sheet.print_area.split("!")[1].replace("$", ""))
         outside = [key for key in writes if key[0] > last_row or key[1] > last_column]
         assert (seed, overwritten, merged_away, outside) == (seed, [], [], [])
-        assert any("납부" in map(str, values) for values in writes.values()), seed
-
-
-def test_text_starting_with_equals_is_not_saved_as_formula(tmp_path) -> None:
-    rows = [
-        _detail_row(1, "매입", "과세", 1000, 100, vendor="=1+2", code="899", account_name="잡비"),
-        _detail_row(2, "매입", "과세", 1000, 100, vendor="상사", code="813", account_name="접대비"),
-        _detail_row(3, "매출", "과세", 2000, 200, code="401", account_name="=매출"),
-    ]
-    settings = CompanySettings(name="=업체", account_overrides={"899": "=분류"})
-    result = process_transactions(
-        pd.DataFrame(rows),
-        settings,
-        decisions={"Sheet1:2": {"decision": "판단 보류", "memo": "=SUM(A1:A2)"}},
-    )
-    workbook = load_workbook(export_workbook(result, settings, tmp_path / "text.xlsx"), data_only=False)
-
-    texts = {"=1+2", "=SUM(A1:A2)", "=업체", "=분류", "=매출"}
-    found = {
-        cell.value: cell.data_type
-        for sheet in workbook.worksheets
-        for row in sheet.iter_rows()
-        for cell in row
-        if isinstance(cell.value, str) and any(text in cell.value for text in texts)
-    }
-    assert texts <= set(found)
-    assert set(found.values()) == {"s"}
-    assert workbook["집계표"]["B5"].data_type == "f"
-
-
-def test_export_creates_required_sheets_and_summary_formulas(tmp_path) -> None:
-    rows = [
-        {
-            "row_id": "Sheet1:2",
-            "sheet": "Sheet1",
-            "source_row": 2,
-            "division": "매입",
-            "date": date(2026, 4, 1),
-            "month": "2026-04",
-            "vendor": "상사",
-            "item": "재료",
-            "supply_amount": Decimal(1000),
-            "tax_amount": Decimal(100),
-            "total_amount": Decimal(1100),
-            "original_type": "과세",
-            "account_code": "146",
-            "account_name": "상품",
-            "card_company": "",
-            "card_number": "",
-        },
-        {
-            "row_id": "Sheet1:3",
-            "sheet": "Sheet1",
-            "source_row": 3,
-            "division": "매입",
-            "date": date(2026, 4, 2),
-            "month": "2026-04",
-            "vendor": "상사",
-            "item": "접대",
-            "supply_amount": Decimal(500),
-            "tax_amount": Decimal(50),
-            "total_amount": Decimal(550),
-            "original_type": "불공",
-            "account_code": "813",
-            "account_name": "접대비",
-            "card_company": "",
-            "card_number": "",
-        },
-        {
-            "row_id": "Sheet1:4",
-            "sheet": "Sheet1",
-            "source_row": 4,
-            "division": "매출",
-            "date": date(2026, 4, 3),
-            "month": "2026-04",
-            "vendor": "고객",
-            "item": "매출",
-            "supply_amount": Decimal(2000),
-            "tax_amount": Decimal(200),
-            "total_amount": Decimal(2200),
-            "original_type": "카과",
-            "account_code": "401",
-            "account_name": "상품매출",
-            "card_company": "국민",
-            "card_number": "1234",
-        },
-    ]
-    settings = CompanySettings(name="테스트상사")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "result.xlsx")
-
-    workbook = load_workbook(output, data_only=False)
-    assert workbook.sheetnames == ["집계표", "불공검토", "거래상세", "미분류", "검산"]
-    summary = workbook["집계표"]
-    assert summary["A1"].value == "2026년 1기 확정"
-    assert summary["E1"].value == "테스트상사"
-    assert summary["I1"].value == "부가세 집계표"
-    assert summary["A3"].value == "①"
-    assert summary["B3"].value == "상품"
-    assert summary["E3"].value == "기타"
-    assert summary["H3"].value == "세금계산서 매입계"
-    assert summary["A4"].value == "4월"
-    assert summary["B4"].value == 1
-    assert summary["C4"].value == 1000
-    assert summary["D4"].value == 100
-    assert summary["E4"].value == 1
-    assert summary["F4"].value == 500
-    assert summary["G4"].value == 50
-    assert summary["H4"].value == 2
-    assert summary["I4"].value == 1500
-    assert summary["J4"].value == 150
-    assert summary["B4"].number_format == '"("0")"'
-    assert summary.row_dimensions[2].height == 25
-    assert summary.row_dimensions[3].height == 25
-    assert summary.row_dimensions[4].height == 25
-    assert summary["B4"].alignment.vertical == "bottom"
-    assert summary["B4"].border.bottom.style == "dotted"
-    assert summary["A5"].value == "계"
-    assert summary["B5"].value == "=SUM(B4:B4)"
-    assert summary.row_dimensions[5].height == 25
-    assert summary["J5"].border.bottom.style == "dotted"
-    assert summary["J5"].border.top.style == "medium"
-    assert summary["H6"].value == "단수차이 조정"
-    assert summary["I6"].value == "=I5"
-    assert summary["J6"].value == "=ROUNDDOWN(I6*0.1,0)"
-    assert summary.row_dimensions[6].height == 25
-    assert summary["I6"].alignment.vertical == "bottom"
-    assert summary["H7"].value == "불공"
-    assert summary["I7"].value == 500
-    assert summary["J7"].value == 50
-    assert summary["H8"].value == "차감계"
-    assert summary["I8"].value == "=I6-I7"
-    assert summary["F9"].value == "납부"
-    assert summary["G9"].value == "=D20-J8"
-    assert summary["B12"].value == "불공"
-    assert summary["B13"].value == 1
-    assert summary["B20"].value == "카드외"
-    assert summary["C20"].value == "=ROUNDUP(G24/1.1,0)"
-    assert summary["D20"].value == "=G24-C20"
-    assert summary["B23"].value == "카드"
-    assert summary["B24"].value == 2200
-    assert summary["B25"].value == "=SUM(B24:B24)"
-    assert summary["G23"].value == "카드"
-    assert summary["F24"].value == "과세"
-    assert summary["G24"].value == 2200
-    assert not any(
-        cell.value
-        in {"원재료(도급)", "제조경비", "도급경비", "고정", "현과", "면세"}
-        for row in summary.iter_rows()
-        for cell in row
-    )
-    assert summary["A3"].fill.fill_type == "solid"
-    assert summary["A3"].fill.fgColor.rgb.endswith("FFFFFF")
-    assert summary["A3"].border.bottom.style == "dotted"
-    assert summary.print_area == "'집계표'!$A$1:$J$25"
-    assert summary.page_setup.orientation == "portrait"
-    assert summary.page_setup.paperWidth == "170mm"
-    assert summary.page_setup.paperHeight == "240mm"
-    assert summary.page_setup.fitToWidth == 1
-    assert summary.page_setup.fitToHeight == 1
-    assert any(
-        isinstance(cell.value, str) and cell.value.startswith("=")
-        for row in summary.iter_rows()
-        for cell in row
-    )
-    assert workbook["거래상세"].max_row == 6
-    assert workbook["거래상세"].max_column == 23
-    assert workbook["거래상세"]["B3"].value == "원본 시트"
-    assert workbook["거래상세"]["C3"].value == "원본 행"
-    assert workbook["거래상세"]["I3"].value == "카드사"
-    assert workbook["거래상세"]["J3"].value == "카드번호"
-    assert workbook["거래상세"]["B4"].value == "Sheet1"
-    assert workbook["거래상세"]["C4"].value == 2
-    assert workbook["검산"]["A1"].value.startswith("검산 결과")
-
-
-def test_export_places_other_input_tax_and_deductions_before_sales(tmp_path) -> None:
-    def row(
-        number: int,
-        division: str,
-        original_type: str,
-        supply: int,
-        tax: int,
-        code: str = "",
-        account_name: str = "",
-    ) -> dict[str, object]:
-        return {
-            "row_id": f"Sheet1:{number}",
-            "sheet": "Sheet1",
-            "source_row": number,
-            "division": division,
-            "date": date(2026, 4, number),
-            "month": "2026-04",
-            "vendor": "거래처",
-            "item": "품목",
-            "supply_amount": Decimal(supply),
-            "tax_amount": Decimal(tax),
-            "total_amount": Decimal(supply + tax),
-            "original_type": original_type,
-            "account_code": code,
-            "account_name": account_name,
-            "card_company": "",
-            "card_number": "",
-        }
-
-    rows = [
-        row(1, "매입", "과세", 1000, 100, "146", "상품"),
-        row(2, "매입", "불공", 200, 20, "813", "접대비"),
-        row(3, "매입", "공통", 150, 15, "813", "공통매입"),
-        row(4, "매입", "카과", 300, 30),
-        row(5, "매입", "현과", 400, 40),
-        row(6, "매입", "의제매입세액", 50, 5),
-        row(7, "매출", "과세", 1000, 100, "401", "상품매출"),
-    ]
-    settings = CompanySettings(name="테스트상사")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "vat-layout.xlsx")
-
-    summary = load_workbook(output, data_only=False)["집계표"]
-    assert summary["H3"].value == "세금계산서 매입계"
-    assert summary["H6"].value == "단수차이 조정"
-    assert summary["H7"].value == "카드외"
-    assert summary["I7"].value == 700
-    assert summary["H8"].value == "의제매입세액"
-    assert summary["I8"].value == 50
-    assert summary["H9"].value == "계"
-    assert summary["I9"].value == "=I6+I7+I8"
-    assert summary["H10"].value == "불공"
-    assert summary["I10"].value == 200
-    assert summary["H11"].value == "공통"
-    assert summary["I11"].value == 150
-    assert summary["H12"].value == "차감계"
-    assert summary["I12"].value == "=I9-I10-I11"
-    assert summary["A16"].value == "②"
-    assert summary["B16"].value == "카과"
-    assert summary["E16"].value == "현과"
-    assert summary["H16"].value == "의제매입세액"
-    assert summary["B17"].value == 1
-    assert summary["C17"].value == 300
-    assert summary["D17"].value == 30
-    assert summary["E17"].value == 1
-    assert summary["F17"].value == 400
-    assert summary["G17"].value == 40
-    assert summary["A24"].value == "③  상품매출 · 세금계산서 매출"
-    assert summary["E24"].value == "불공"
-    assert summary["H24"].value == "공통"
-
-
-def test_purchase_rounding_with_only_deduction_skips_intermediate_total(tmp_path) -> None:
-    rows = []
-    for number, original_type, code, supply, tax in (
-        (1, "과세", "146", 800, 79),
-        (2, "불공", "813", 200, 20),
-    ):
-        rows.append(
-            {
-                "row_id": f"Sheet1:{number}",
-                "sheet": "Sheet1",
-                "source_row": number,
-                "division": "매입",
-                "date": date(2026, 4, number),
-                "month": "2026-04",
-                "vendor": "거래처",
-                "item": "품목",
-                "supply_amount": Decimal(supply),
-                "tax_amount": Decimal(tax),
-                "total_amount": Decimal(supply + tax),
-                "original_type": original_type,
-                "account_code": code,
-                "account_name": "상품" if code == "146" else "접대비",
-                "card_company": "",
-                "card_number": "",
-            }
-        )
-
-    settings = CompanySettings(name="중간계제외")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "no-duplicate-total.xlsx")
-    summary = load_workbook(output, data_only=False)["집계표"]
-
-    assert summary["H6"].value == "단수차이 조정"
-    assert summary["H7"].value == "불공"
-    assert summary["H8"].value == "차감계"
-    assert summary["I8"].value == "=I6-I7"
-
-
-def test_export_splits_fixed_assets_after_rounding_adjustment(tmp_path) -> None:
-    rows = [
-        {
-            "row_id": "Sheet1:2",
-            "sheet": "Sheet1",
-            "source_row": 2,
-            "division": "매입",
-            "date": date(2026, 4, 1),
-            "month": "2026-04",
-            "vendor": "일반거래처",
-            "item": "일반",
-            "supply_amount": Decimal(1005),
-            "tax_amount": Decimal(100),
-            "total_amount": Decimal(1105),
-            "original_type": "과세",
-            "account_code": "146",
-            "account_name": "상품",
-            "card_company": "",
-            "card_number": "",
-        },
-        {
-            "row_id": "Sheet1:3",
-            "sheet": "Sheet1",
-            "source_row": 3,
-            "division": "매입",
-            "date": date(2026, 4, 2),
-            "month": "2026-04",
-            "vendor": "고정거래처",
-            "item": "비품",
-            "supply_amount": Decimal(1005),
-            "tax_amount": Decimal(100),
-            "total_amount": Decimal(1105),
-            "original_type": "과세",
-            "account_code": "212",
-            "account_name": "비품",
-            "card_company": "",
-            "card_number": "",
-        },
-    ]
-    settings = CompanySettings(name="고정테스트")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "fixed-layout.xlsx")
-
-    summary = load_workbook(output, data_only=False)["집계표"]
-    assert summary["E3"].value == "고정"
-    assert summary["H3"].value == "세금계산서 매입계"
-    assert summary["H6"].value == "단수차이 조정"
-    assert summary["I6"].value == "=I5"
-    assert summary["J6"].value == "=ROUNDDOWN(I6*0.1,0)"
-    assert summary["H7"].value == "일반"
-    assert summary["I7"].value == 1005
-    assert summary["J7"].value == "=J6-J8"
-    assert summary["H8"].value == "고정"
-    assert summary["I8"].value == 1005
-    assert summary["J8"].value == 100
-    assert summary["H9"].value == "계"
-    assert summary["I9"].value == "=I7+I8"
-    assert summary["J9"].value == "=J7+J8"
-    assert summary["H10"].value is None
-
-
-def test_export_matches_tobacco_and_card_cash_sales_layout(tmp_path) -> None:
-    def row(
-        number: int,
-        division: str,
-        original_type: str,
-        supply: int,
-        tax: int,
-        *,
-        vendor: str = "거래처",
-        code: str = "401",
-        account_name: str = "상품매출",
-    ) -> dict[str, object]:
-        return {
-            "row_id": f"Sheet1:{number}",
-            "sheet": "Sheet1",
-            "source_row": number,
-            "division": division,
-            "date": date(2026, 4, number),
-            "month": "2026-04",
-            "vendor": vendor,
-            "item": "품목",
-            "supply_amount": Decimal(supply),
-            "tax_amount": Decimal(tax),
-            "total_amount": Decimal(supply + tax),
-            "original_type": original_type,
-            "account_code": code,
-            "account_name": account_name,
-            "card_company": "제로페이" if "제로페이" in vendor else "",
-            "card_number": "",
-        }
-
-    rows = [
-        row(1, "매입", "과세", 1000, 100, vendor="일반상사", code="146", account_name="상품"),
-        row(2, "매입", "과세", 2000, 200, vendor="케이티앤지", code="146", account_name="상품"),
-        row(3, "매입", "과세", 3000, 300, vendor="기타상사", code="813", account_name="기타"),
-        row(4, "매출", "과세", 1000, 100),
-        row(5, "매출", "면세", 500, 0),
-        row(6, "매출", "카과", 1000, 100),
-        row(7, "매출", "카과", 200, 20, vendor="제로페이"),
-        row(8, "매출", "카면", 300, 0),
-        row(9, "매출", "카영", 400, 0),
-        row(10, "매출", "현과", 500, 50),
-        row(11, "매출", "현면", 200, 0),
-        row(12, "매출", "현영", 100, 0),
-    ]
-    result = process_transactions(pd.DataFrame(rows), CompanySettings(name="담배배치"))
-    output = export_workbook(result, CompanySettings(name="담배배치"), tmp_path / "tobacco-card-layout.xlsx")
-
-    summary = load_workbook(output, data_only=False)["집계표"]
-    assert summary["B3"].value == "상품"
-    assert summary["E3"].value == "담배"
-    assert summary["H3"].value == "기타"
-    assert summary["K3"].value == "세금계산서 매입계"
-    assert summary["B4"].value == 1
-    assert summary["E4"].value == 1
-    assert summary["F4"].value == 2000
-    assert summary["K6"].value == "단수차이 조정"
-    assert summary["L6"].value == "=L5"
-    assert summary["M6"].value == "=ROUNDDOWN(L6*0.1,0)"
-
-    assert summary["A12"].value == "③  상품매출 · 세금계산서 매출"
-    assert summary["B13"].value == 1
-    assert summary["C13"].value == 1000
-    assert summary["E12"].value == "면세 계산서 매출"
-    assert summary["E13"].value == 1
-    assert summary["F13"].value == 500
-    assert summary["B15"].value == "단수차이 조정"
-    assert summary["C15"].value == "=C14"
-    assert summary["D15"].value == "=ROUNDDOWN(C15*0.1,0)"
-    assert summary["B16"].value == "카드외"
-    assert summary["C16"].value == "=ROUNDUP(J21/1.1,0)"
-    assert summary["D16"].value == "=J21-C16"
-    assert summary["F16"].value == "=J22"
-    assert summary["B17"].value == "계"
-
-    assert summary["B20"].value == "카드"
-    assert summary["C20"].value == "현영"
-    assert summary["D20"].value == "제로페이"
-    assert summary["B21"].value == 1800
-    assert summary["C21"].value == 850
-    assert summary["D21"].value == 220
-    assert summary["B22"].value == "=SUM(B21:B21)"
-
-    assert summary["G20"].value == "카드"
-    assert summary["H20"].value == "현영"
-    assert summary["I20"].value == "제로페이"
-    assert summary["J20"].value == "계"
-    assert summary["F21"].value == "과세"
-    assert summary["G21"].value == 1100
-    assert summary["H21"].value == 550
-    assert summary["I21"].value == 220
-    assert summary["J21"].value == "=SUM(G21:I21)"
-    assert summary["F22"].value == "면세"
-    assert summary["G22"].value == 700
-    assert summary["H22"].value == 300
-    assert summary["I22"].value is None
-    assert summary["J22"].value == "=SUM(G22:I22)"
-    assert summary["F23"].value == "계"
-    assert summary["G23"].value == "=SUM(G21:G22)"
-    assert summary["J23"].value == "=SUM(J21:J22)"
-    assert summary["G20"].font.name == "맑은 고딕"
-    assert summary["G20"].font.sz == 9
-    assert summary["G20"].font.bold
-    assert summary["G21"].font.name == "맑은 고딕"
-    assert summary["G21"].font.sz == 9
-    assert summary["F23"].border.top.style == "medium"
-    assert summary.print_area == "'집계표'!$A$1:$M$23"
-
-
-def test_export_uses_sample_layout_for_six_month_custom_category(tmp_path) -> None:
-    rows = []
-    row_number = 1
-    for month in range(1, 7):
-        for original_type, code, account_name, supply, tax in (
-            ("과세", "899", "운송경비", 100, 10),
-            ("과세", "813", "기타", 50, 5),
-            ("과세", "212", "차량운반구", 1000, 100),
-            ("카과", "", "", 200, 20),
-            ("현과", "", "", 100, 10),
-            ("과세", "401", "차량운반구", 5000, 500),
-        ):
-            division = "매출" if code == "401" else "매입"
-            rows.append(
-                {
-                    "row_id": f"Sheet1:{row_number}",
-                    "sheet": "Sheet1",
-                    "source_row": row_number,
-                    "division": division,
-                    "date": date(2026, month, 1),
-                    "month": f"2026-{month:02d}",
-                    "vendor": "거래처",
-                    "item": "품목",
-                    "supply_amount": Decimal(supply),
-                    "tax_amount": Decimal(tax),
-                    "total_amount": Decimal(supply + tax),
-                    "original_type": original_type,
-                    "account_code": code,
-                    "account_name": account_name,
-                    "card_company": "",
-                    "card_number": "",
-                }
-            )
-            row_number += 1
-
-    settings = CompanySettings(
-        name="육개월배치",
-        fixed_asset_codes={"212"},
-        account_overrides={"899": "운송경비"},
-    )
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "six-month-layout.xlsx")
-    summary = load_workbook(output, data_only=False)["집계표"]
-
-    assert summary["B3"].value == "운송경비"
-    assert summary["E3"].value == "기타"
-    assert summary["H3"].value == "고정"
-    assert summary["K3"].value == "세금계산서 매입계"
-    assert summary["K11"].value == "단수차이 조정"
-    assert summary["A13"].value == "②"
-    assert summary["B13"].value == "카과"
-    assert summary["E13"].value == "현과"
-    assert summary["A24"].value == "③  차량운반구 · 세금계산서 매출"
-    assert summary.print_area == "'집계표'!$A$1:$M$32"
-
-
-def test_export_includes_zero_rated_other_sales_and_optional_adjustments(tmp_path) -> None:
-    def row(
-        number: int,
-        division: str,
-        original_type: str,
-        supply: int,
-        tax: int,
-        account_name: str,
-    ) -> dict[str, object]:
-        return {
-            "row_id": f"Sheet1:{number}",
-            "sheet": "Sheet1",
-            "source_row": number,
-            "division": division,
-            "date": date(2026, 4, number),
-            "month": "2026-04",
-            "vendor": "거래처",
-            "item": "품목",
-            "supply_amount": Decimal(supply),
-            "tax_amount": Decimal(tax),
-            "total_amount": Decimal(supply + tax),
-            "original_type": original_type,
-            "account_code": "146" if division == "매입" else "401",
-            "account_name": account_name,
-            "card_company": "",
-            "card_number": "",
-        }
-
-    rows = [
-        row(1, "매입", "과세", 1000, 99, "상품"),
-        row(2, "매입", "영세", 200, 0, "상품"),
-        row(3, "매출", "과세", 1000, 99, "회사설정계정과목"),
-        row(4, "매출", "건별", 500, 50, "상품매출"),
-        row(5, "매출", "면건", 300, 0, "상품매출"),
-    ]
-    settings = CompanySettings(name="조정테스트", prior_period_credit=100)
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "adjusted-layout.xlsx")
-    summary = load_workbook(output, data_only=False)["집계표"]
-
-    labels = {
-        cell.value: cell
-        for row_cells in summary.iter_rows()
-        for cell in row_cells
-        if isinstance(cell.value, str) and not cell.value.startswith("=")
-    }
-    assert any(label.endswith("수입금액 · 세금계산서 매출") for label in labels)
-    assert labels["영세 매입"]
-    assert labels["기타"]
-    other_row = labels["기타"].row
-    assert _formula_value(summary, f"C{other_row}") == 500
-    assert _formula_value(summary, f"D{other_row}") == 50
-    assert summary.cell(other_row, 6).value == 300
-
-    assert "카드공제" not in labels
-    assert _labelled_value(summary, "납부") == 50
-    assert summary.cell(labels["예정미환급"].row, labels["예정미환급"].column + 1).value == 100
-    assert _labelled_value(summary, "차감") == -50
-    assert sum(
-        cell.value == "단수차이 조정"
-        for row_cells in summary.iter_rows()
-        for cell in row_cells
-    ) == 2
-    assert summary.print_area.endswith(f"$J${summary.max_row}")
-
-
-def test_export_handles_all_payment_purchase_types_and_multiple_invoice_accounts(
-    tmp_path,
-) -> None:
-    def row(
-        number: int,
-        division: str,
-        original_type: str,
-        supply: int,
-        tax: int,
-        *,
-        code: str = "",
-        account_name: str = "",
-    ) -> dict[str, object]:
-        return {
-            "row_id": f"Sheet1:{number}",
-            "sheet": "Sheet1",
-            "source_row": number,
-            "division": division,
-            "date": date(2026, 4, number),
-            "month": "2026-04",
-            "vendor": "거래처",
-            "item": "품목",
-            "supply_amount": Decimal(supply),
-            "tax_amount": Decimal(tax),
-            "total_amount": Decimal(supply + tax),
-            "original_type": original_type,
-            "account_code": code,
-            "account_name": account_name,
-            "card_company": "",
-            "card_number": "",
-        }
-
-    rows = [
-        row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
-        row(2, "매입", "카면", 500, 0),
-        row(3, "매입", "카영", 100, 0),
-        row(4, "매입", "현면", 200, 0),
-        row(5, "매입", "현영", 50, 0),
-        row(6, "매출", "과세", 2000, 200, code="401", account_name="상품매출"),
-        row(7, "매출", "과세", 3000, 300, code="206", account_name="차량운반구"),
-    ]
-    settings = CompanySettings(name="복합유형")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "generic-layout.xlsx")
-    summary = load_workbook(output, data_only=False)["집계표"]
-
-    values = [
-        cell.value
-        for row_cells in summary.iter_rows()
-        for cell in row_cells
-        if cell.value is not None
-    ]
-    for label in ("카면", "카영", "현면", "현영"):
-        assert label in values
-    assert values.count("③  세금계산서 매출") == 1
-    assert "상품매출 · 세금계산서 매출" not in values
-    assert "차량운반구 · 세금계산서 매출" not in values
-
-    title = next(
-        cell
-        for row_cells in summary.iter_rows()
-        for cell in row_cells
-        if cell.value == "③  세금계산서 매출"
-    )
-    assert summary.cell(title.row, 5).value == "상품매출"
-    assert summary.cell(title.row, 6).value == "차량운반구"
-    assert summary.cell(title.row + 1, 3).value == 5000
-    assert summary.cell(title.row + 1, 5).value == 2000
-    assert summary.cell(title.row + 1, 6).value == 3000
-    assert summary.cell(title.row + 3, 3).value == f"=C{title.row + 2}"
-
-
-def test_export_keeps_payment_outside_three_wide_purchase_detail_tables(
-    tmp_path,
-) -> None:
-    def row(
-        number: int,
-        division: str,
-        original_type: str,
-        supply: int,
-        tax: int,
-        *,
-        vendor: str = "거래처",
-        code: str = "",
-        account_name: str = "",
-    ) -> dict[str, object]:
-        return {
-            "row_id": f"Sheet1:{number}",
-            "sheet": "Sheet1",
-            "source_row": number,
-            "division": division,
-            "date": date(2026, 4, number),
-            "month": "2026-04",
-            "vendor": vendor,
-            "item": "품목",
-            "supply_amount": Decimal(supply),
-            "tax_amount": Decimal(tax),
-            "total_amount": Decimal(supply + tax),
-            "original_type": original_type,
-            "account_code": code,
-            "account_name": account_name,
-            "card_company": "",
-            "card_number": "",
-        }
-
-    rows = [
-        row(1, "매입", "과세", 1000, 100, code="146", account_name="상품"),
-        row(
-            2,
-            "매입",
-            "과세",
-            2000,
-            200,
-            vendor="케이티앤지",
-            code="146",
-            account_name="상품",
-        ),
-        row(3, "매입", "과세", 3000, 300, code="813", account_name="기타"),
-        row(4, "매입", "카면", 400, 0),
-        row(5, "매입", "면세", 500, 0),
-        row(6, "매입", "영세", 600, 0),
-        row(7, "매출", "과세", 7000, 700, code="401", account_name="상품매출"),
-    ]
-    settings = CompanySettings(name="넓은배치")
-    result = process_transactions(pd.DataFrame(rows), settings)
-    output = export_workbook(result, settings, tmp_path / "wide-detail-payment.xlsx")
-    summary = load_workbook(output, data_only=False)["집계표"]
-
-    assert summary["A7"].value == "②"
-    assert summary["B7"].value == "카면"
-    assert summary["E7"].value == "면세 매입"
-    assert summary["H7"].value == "영세 매입"
-    assert summary["L7"].value == "납부"
-    assert str(summary["M7"].value).startswith("=")
+        for label, (row, supply_column) in summary_cells(sheet).items():
+            key = SUMMARY_KEYS.get(label)
+            if key is None:
+                continue
+            expected = next(item for item in result.summary if item.key == key)
+            for column, value in ((supply_column, expected.supply), (supply_column + 1, expected.tax)):
+                if value is not None:
+                    assert _formula_value(sheet, f"{get_column_letter(column)}{row}") == value, (seed, label)

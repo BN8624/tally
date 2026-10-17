@@ -1,180 +1,385 @@
-# 상세 거래를 정본 규칙에 따라 분류·집계하고 원본 대비 검산합니다.
+# 상세 거래를 업종 틀의 블록·열에 월별로 배치하고 요약 값과 검산을 계산합니다.
 from __future__ import annotations
 
-from dataclasses import dataclass
-from decimal import Decimal
-from typing import Mapping
+from dataclasses import dataclass, field
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal
+from typing import Iterable
 
 import pandas as pd
 
+from .profiles import EXEMPT_CARD_COLUMNS, EXEMPT_PAYMENT, Profile, profile_for
 from .settings import CompanySettings
 
+ZERO = Decimal(0)
+PURCHASE_INVOICE_TYPES = {"과세", "불공", "공통", "공통매입", "공통매입세액"}
+PURCHASE_EXEMPT_TYPES = {"면세", "의제", "의제매입", "의제매입세액"}
+PURCHASE_CARD_TYPES = {"카과", "현과", "카면", "카영", "현면", "현영"}
+SALES_PAYMENT_TYPES = {"카과", "현과", "건별", "카면", "카영", "현면", "현영", "면건"}
+CANDIDATE_TYPES = {"과세", "카과", "현과"}
 
-ZERO = Decimal("0")
-PURCHASE_REVIEW_TYPES = {"과세", "불공"}
-PURCHASE_COMMON_TYPES = {"공통", "공통매입", "공통매입세액"}
-PURCHASE_TAX_TYPES = PURCHASE_REVIEW_TYPES | PURCHASE_COMMON_TYPES
-PURCHASE_CARD_TYPES = {"카과", "현과"}
-PURCHASE_DEEMED_TYPES = {"의제", "의제매입", "의제매입세액"}
-SALES_TAX_TYPES = {"과세", "건별", "카과", "현과"}
-SALES_CARD_TYPES = {"카과", "카면", "카영"}
-SALES_CARD_EXEMPT_TYPES = {"카면", "카영"}
-SALES_CASH_TYPES = {"현과", "현면", "현영"}
-SALES_CASH_EXEMPT_TYPES = {"현면", "현영"}
-PURCHASE_EXEMPT_PAYMENT_TYPES = {"카면", "카영", "현면", "현영"}
-PURCHASE_OTHER_TYPES = {"면세", "영세"}
-PURCHASE_KNOWN_TYPES = (
-    PURCHASE_TAX_TYPES
-    | PURCHASE_CARD_TYPES
-    | PURCHASE_DEEMED_TYPES
-    | PURCHASE_EXEMPT_PAYMENT_TYPES
-    | PURCHASE_OTHER_TYPES
-)
-SALES_OTHER_EXEMPT_TYPES = {"면건"}
-SALES_KNOWN_TYPES = (
-    SALES_TAX_TYPES
-    | SALES_CARD_TYPES
-    | SALES_CASH_TYPES
-    | {"면세"}
-    | SALES_OTHER_EXEMPT_TYPES
-)
+PURCHASE = "purchase"
+EXEMPT = "exempt"
+NONDEDUCTIBLE = "nondeductible"
+CARD = "card"
+SALES = "sales"
+PAYMENT = "payment"
+BLOCK_TITLES = {
+    PURCHASE: "매입 세금계산서",
+    EXEMPT: "면세매입",
+    NONDEDUCTIBLE: "불공",
+    CARD: "카드외 매입",
+    SALES: "매출 세금계산서",
+    PAYMENT: "결제 채널 매출",
+}
+DEFAULT_PAYMENT_ORDER = ("카드", "현영", "제로페이", "현금", *EXEMPT_PAYMENT)
+
+
+@dataclass(frozen=True)
+class Period:
+    year: int
+    half: int
+    kind: str
+
+    @property
+    def months(self) -> list[str]:
+        start = 1 if self.half == 1 else 7
+        if self.kind == "확정":
+            start += 3
+        count = 6 if self.kind == "확정6" else 3
+        return [f"{self.year}-{month:02d}" for month in range(start, start + count)]
+
+    @property
+    def label(self) -> str:
+        return f"{self.year}년 {self.half}기 {'확정(6개월)' if self.kind == '확정6' else self.kind}"
+
+
+def _quarter_period(month: str) -> Period:
+    year, number = int(month[:4]), int(month[5:7])
+    return Period(year, 1 if number <= 6 else 2, "예정" if number in {1, 2, 3, 7, 8, 9} else "확정")
+
+
+def available_periods(months: Iterable[str]) -> list[Period]:
+    found: set[Period] = set()
+    for month in months:
+        quarter = _quarter_period(month)
+        found.update({quarter, Period(quarter.year, quarter.half, "확정6")})
+    order = {"예정": 0, "확정": 1, "확정6": 2}
+    return sorted(found, key=lambda period: (period.year, period.half, order[period.kind]))
+
+
+def default_period(months: Iterable[str]) -> Period | None:
+    """마지막 거래 월까지 끝난 가장 최근 분기, 없으면 마지막 거래 월의 분기를 고릅니다."""
+    ordered = sorted(months)
+    if not ordered:
+        return None
+    last = ordered[-1]
+    completed = [
+        period
+        for period in available_periods(ordered)
+        if period.kind != "확정6" and period.months[-1] <= last
+    ]
+    return completed[-1] if completed else _quarter_period(last)
+
+
+@dataclass(frozen=True)
+class Column:
+    label: str
+    kind: str
+    sum_of: tuple[str, ...] = ()
+    extra: bool = False
+
+
+@dataclass(slots=True)
+class SummaryRow:
+    key: str
+    label: str
+    supply: Decimal | None
+    tax: Decimal | None
 
 
 @dataclass(slots=True)
 class ProcessingResult:
     transactions: pd.DataFrame
-    review: pd.DataFrame
-    purchase_by_category: pd.DataFrame
-    purchase_summary: pd.DataFrame
-    sales_by_account: pd.DataFrame
-    sales_summary: pd.DataFrame
+    settings: CompanySettings
+    profile: Profile
+    period: Period | None
+    periods: list[Period]
+    layout: dict[str, list[Column]]
+    cells: pd.DataFrame
+    summary: list[SummaryRow]
+    candidates: pd.DataFrame
+    unclassified: pd.DataFrame
     validation: pd.DataFrame
     validation_passed: bool
+    notes: list[str] = field(default_factory=list)
+
+    def summary_value(self, key: str, field_name: str = "tax") -> Decimal:
+        row = next(row for row in self.summary if row.key == key)
+        value = row.supply if field_name == "supply" else row.tax
+        return value if value is not None else ZERO
 
 
-def classify_purchase_account(code: str, settings: CompanySettings) -> str:
-    code = str(code).strip()
-    if code in settings.account_overrides:
-        return settings.account_overrides[code]
-    if code in settings.fixed_asset_codes:
-        return "고정"
-    if len(code) == 3 and code.isdigit() and code.startswith("2"):
-        return "고정"
-    if code == "146":
-        return settings.account_146_label
-    if code == "156":
-        return "원재료(도급)"
-    if len(code) == 3 and code.isdigit():
-        if code.startswith("5"):
-            return "제조경비"
-        if code.startswith("6"):
-            return "도급경비"
-        if code.startswith("8"):
-            return "기타"
-    return "미분류"
+def d0(value: Decimal) -> Decimal:
+    return Decimal(int(value.to_integral_value(rounding=ROUND_DOWN)))
 
 
-def _matches_keyword(value: object, keywords: list[str]) -> bool:
+def u0(value: Decimal) -> Decimal:
+    return Decimal(int(value.to_integral_value(rounding=ROUND_CEILING if value >= 0 else ROUND_FLOOR)))
+
+
+def _matches(value: object, keywords: Iterable[str]) -> bool:
     normalized = str(value or "").casefold().replace(" ", "")
     return any(keyword.casefold().replace(" ", "") in normalized for keyword in keywords)
 
 
 def _is_zero_pay(row: pd.Series) -> bool:
-    context = " ".join(
-        str(row.get(column, ""))
-        for column in ("vendor", "item", "card_company", "card_number")
-    )
+    context = " ".join(str(row.get(column, "")) for column in ("vendor", "item", "card_company", "card_number"))
     normalized = context.casefold().replace(" ", "")
     return "제로페이" in normalized or ("제로" in normalized and "페이" in normalized)
 
 
 def find_nondeductible_candidate(row: pd.Series, settings: CompanySettings) -> str:
-    if row["division"] != "매입" or row["original_type"] not in PURCHASE_REVIEW_TYPES:
+    if row["division"] != "매입" or row["original_type"] not in CANDIDATE_TYPES:
         return ""
-    if row["original_type"] == "불공":
-        return "원본 유형이 불공"
-
     account = f"{row['account_code']} {row['account_name']}".casefold()
     context = f"{row['vendor']} {row['item']} {row['account_name']}".casefold()
     reasons: list[str] = []
-    if any(keyword.casefold() in account for keyword in ("접대비", "기업업무추진비")):
+    if any(keyword in account for keyword in ("접대비", "기업업무추진비")):
         reasons.append(f"계정과목 {row['account_code']} {row['account_name']}")
-    vehicle_hits = [keyword for keyword in settings.vehicle_keywords if keyword.casefold() in context]
-    if vehicle_hits:
-        reasons.append(f"차량 관련 값 감지: {', '.join(vehicle_hits)}")
-    vendor_hits = [keyword for keyword in settings.vendor_keywords if keyword.casefold() in context]
-    if vendor_hits:
-        reasons.append(f"업체 규칙 감지: {', '.join(vendor_hits)}")
-    personal_hits = [keyword for keyword in settings.personal_keywords if keyword.casefold() in context]
-    if personal_hits:
-        reasons.append(f"사업 무관 가능성: {', '.join(personal_hits)}")
+    for label, keywords in (
+        ("차량 관련 값", settings.vehicle_keywords),
+        ("거래처 후보", settings.vendor_keywords),
+        ("사업 무관 가능성", settings.personal_keywords),
+    ):
+        hits = [keyword for keyword in keywords if keyword.casefold() in context]
+        if hits:
+            reasons.append(f"{label}: {', '.join(hits)}")
     return "; ".join(reasons)
 
 
-def _decision_values(original_type: str, candidate_reason: str, decision: Mapping[str, str]) -> tuple[str, str, str, str]:
-    requested = decision.get("decision", "").strip()
-    reason = decision.get("reason", "").strip()
-    memo = decision.get("memo", "").strip()
-    if not requested:
-        if original_type == "불공":
-            return "불공 유지", "불공", reason or "원본에서 불공 지정", memo
-        if candidate_reason:
-            return "판단 보류", original_type, reason, memo
-        return "과세 유지", original_type, reason, memo
-
-    valid = {"불공 유지", "과세로 변경", "과세 유지", "불공으로 변경", "판단 보류"}
-    if requested not in valid:
-        raise ValueError(f"지원하지 않는 불공 판정입니다. 판정={requested}")
-    if requested in {"불공 유지", "불공으로 변경"}:
-        return requested, "불공", reason or "사용자 불공 확정", memo
-    if requested in {"과세 유지", "과세로 변경"}:
-        return requested, "과세", reason, memo
-    return requested, original_type, reason, memo
+def _payment_column(row: pd.Series, profile: Profile) -> str:
+    original = row["original_type"]
+    if original == "카과":
+        if _is_zero_pay(row):
+            return "제로페이"
+        for label, keywords in profile.channels:
+            if any(_matches(row.get(column, ""), keywords) for column in ("vendor", "item", "card_company")):
+                return label
+        return "카드"
+    return {"현과": "현영", "건별": "현금", "카면": "카드면세", "카영": "카드면세", "현면": "현영면세", "현영": "현영면세", "면건": "면세현금"}[original]
 
 
-def _aggregate(frame: pd.DataFrame, groups: list[str]) -> pd.DataFrame:
-    columns = groups + ["count", "supply_amount", "tax_amount", "total_amount"]
-    if frame.empty:
+def _sales_column(row: pd.Series) -> str:
+    original = row["original_type"]
+    if original == "영세":
+        return "영세"
+    if original == "면세":
+        return "면세"
+    code = str(row["account_code"]).strip()
+    if len(code) == 3 and code.isdigit() and code.startswith("2"):
+        return "고정"
+    name = str(row["account_name"]).strip() or "세금계산서"
+    return "수입금액" if name.replace(" ", "") == "회사설정계정과목" else name
+
+
+def _place(row: pd.Series, settings: CompanySettings, profile: Profile) -> tuple[str, str, str]:
+    division, original = row["division"], row["original_type"]
+    code = row["account_code"]
+    if division == "매입":
+        if original in PURCHASE_INVOICE_TYPES:
+            column, note = profile.purchase_column(code, settings.fixed_asset_codes, settings.account_overrides)
+            return PURCHASE, column, note
+        if original in PURCHASE_EXEMPT_TYPES:
+            return EXEMPT, profile.exempt_column(code, settings.account_overrides), ""
+        if original == "영세":
+            return EXEMPT, "영세", ""
+        if original in PURCHASE_CARD_TYPES:
+            return CARD, profile.card_column(original, code), ""
+    elif division == "매출":
+        if original in {"과세", "영세", "면세"}:
+            return SALES, _sales_column(row), ""
+        if original in SALES_PAYMENT_TYPES:
+            return PAYMENT, _payment_column(row, profile), ""
+    return "", "", ""
+
+
+def _ordered_extras(present: Iterable[str], fixed: Iterable[str]) -> list[str]:
+    fixed_set = set(fixed)
+    return sorted({label for label in present if label and label not in fixed_set})
+
+
+def _build_layout(placed: pd.DataFrame, profile: Profile) -> tuple[dict[str, list[Column]], list[str]]:
+    present = {block: set(group["column"]) for block, group in placed.groupby("block")}
+    layout: dict[str, list[Column]] = {}
+    added: list[str] = []
+
+    purchase_extras = _ordered_extras(present.get(PURCHASE, ()), profile.purchase_columns)
+    purchase_labels = [*profile.purchase_columns, *purchase_extras]
+    layout[PURCHASE] = [
+        *(Column(label, "tax", extra=label in purchase_extras) for label in purchase_labels),
+        Column("계", "tax", tuple(purchase_labels)),
+    ]
+
+    exempt_present = present.get(EXEMPT, set())
+    exempt_extras = _ordered_extras(exempt_present - {"영세"}, profile.exempt_columns)
+    exempt_labels = [*profile.exempt_columns, *exempt_extras]
+    layout[EXEMPT] = [
+        *(Column(label, "exempt", extra=label in exempt_extras) for label in exempt_labels),
+        Column("면세 계", "exempt", tuple(exempt_labels)),
+        *([Column("영세", "exempt", extra=True)] if "영세" in exempt_present else []),
+    ]
+    layout[NONDEDUCTIBLE] = [Column("불공", "tax")]
+
+    card_extras = _ordered_extras(present.get(CARD, ()), profile.card_columns)
+    card_labels = [*profile.card_columns, *card_extras]
+    taxable_cards = tuple(label for label in card_labels if label not in EXEMPT_CARD_COLUMNS)
+    layout[CARD] = [
+        *(
+            Column(label, "exempt" if label in EXEMPT_CARD_COLUMNS else "tax", extra=label in card_extras)
+            for label in card_labels
+        ),
+        Column("공제 계", "tax", taxable_cards),
+    ]
+
+    sales_present = present.get(SALES, set())
+    accounts = sorted(
+        label for label in sales_present if label not in {"고정", "영세", "면세"}
+    ) or ["세금계산서"]
+    accounts = _account_order(placed, accounts)
+    taxable_sales = [*accounts, "고정"]
+    layout[SALES] = [
+        *(Column(label, "tax") for label in taxable_sales),
+        Column("계", "tax", tuple(taxable_sales)),
+        *([Column("영세", "exempt", extra=True)] if "영세" in sales_present else []),
+        *(
+            [Column("면세", "exempt", extra=not profile.sales_exempt_fixed)]
+            if profile.sales_exempt_fixed or "면세" in sales_present
+            else []
+        ),
+    ]
+
+    payment_present = present.get(PAYMENT, set())
+    if profile.payment_columns or payment_present:
+        fixed = list(profile.payment_columns) or [label for label in DEFAULT_PAYMENT_ORDER if label in payment_present]
+        extras = _ordered_extras(payment_present, fixed)
+        labels = [*fixed, *extras]
+        taxable = [label for label in labels if label not in {"현금", *EXEMPT_PAYMENT}]
+        exempt = [label for label in labels if label in EXEMPT_PAYMENT]
+        extra_set = set(extras) if profile.payment_columns else set(labels)
+        layout[PAYMENT] = [
+            *(Column(label, "amount", extra=label in extra_set) for label in taxable),
+            Column("과세 계", "amount", tuple(taxable)),
+            *([Column("현금", "amount", extra="현금" in extra_set)] if "현금" in labels else []),
+            *(Column(label, "amount", extra=label in extra_set) for label in exempt),
+        ]
+        if not profile.payment_columns:
+            added.append(f"{BLOCK_TITLES[PAYMENT]} 블록")
+
+    for block, columns in layout.items():
+        added.extend(f"{BLOCK_TITLES[block]} · {column.label}" for column in columns if column.extra)
+    return layout, added
+
+
+def _account_order(placed: pd.DataFrame, accounts: list[str]) -> list[str]:
+    sales = placed[(placed["block"] == SALES) & placed["column"].isin(accounts)]
+    first_code = sales.groupby("column")["account_code"].min().to_dict() if not sales.empty else {}
+    return sorted(accounts, key=lambda label: (str(first_code.get(label, "999")), label))
+
+
+def _aggregate(placed: pd.DataFrame) -> pd.DataFrame:
+    columns = ["block", "column", "month", "count", "supply", "tax", "total"]
+    if placed.empty:
         return pd.DataFrame(columns=columns)
-    result = (
-        frame.groupby(groups, sort=True, dropna=False)
+    grouped = (
+        placed.groupby(["block", "column", "month"], sort=True)
         .agg(
             count=("row_id", "size"),
-            supply_amount=("supply_amount", "sum"),
-            tax_amount=("tax_amount", "sum"),
-            total_amount=("total_amount", "sum"),
+            supply=("supply_amount", "sum"),
+            tax=("tax_amount", "sum"),
+            total=("total_amount", "sum"),
         )
         .reset_index()
     )
-    return result[columns]
+    return grouped[columns]
 
 
-def _summary_rows(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
-    rows: list[pd.DataFrame] = []
-    for item, frame in frames.items():
-        aggregate = _aggregate(frame, ["month"])
-        aggregate.insert(0, "item", item)
-        rows.append(aggregate)
-    if not rows:
-        return pd.DataFrame(columns=["item", "month", "count", "supply_amount", "tax_amount", "total_amount"])
-    return pd.concat(rows, ignore_index=True)
+def cell_total(cells: pd.DataFrame, block: str, labels: Iterable[str], field_name: str) -> Decimal:
+    labels = set(labels)
+    rows = cells[(cells["block"] == block) & cells["column"].isin(labels)]
+    total = sum((Decimal(str(value)) for value in rows[field_name]), ZERO)
+    return Decimal(int(total)) if total == total.to_integral_value() else total
 
 
-def _numeric_total(frame: pd.DataFrame, column: str) -> Decimal:
-    if frame.empty:
-        return ZERO
-    value = frame[column].sum()
-    return value if isinstance(value, Decimal) else Decimal(str(value))
+def _summary(cells: pd.DataFrame, layout: dict[str, list[Column]], settings: CompanySettings) -> list[SummaryRow]:
+    def data_labels(block: str, kind: str | None = None) -> list[str]:
+        return [column.label for column in layout.get(block, []) if not column.sum_of and (kind is None or column.kind == kind)]
+
+    def sum_labels(block: str, sum_label: str) -> tuple[str, ...]:
+        return next((column.sum_of for column in layout.get(block, []) if column.label == sum_label), ())
+
+    invoice_labels = sum_labels(PURCHASE, "계")
+    invoice_supply = cell_total(cells, PURCHASE, invoice_labels, "supply")
+    invoice_tax = d0(invoice_supply * Decimal("0.1"))
+    fixed_supply = cell_total(cells, PURCHASE, ["고정"], "supply")
+    fixed_tax = cell_total(cells, PURCHASE, ["고정"], "tax")
+    card_labels = sum_labels(CARD, "공제 계")
+    card_supply = cell_total(cells, CARD, card_labels, "supply")
+    card_tax = cell_total(cells, CARD, card_labels, "tax")
+    nondeductible_supply = cell_total(cells, NONDEDUCTIBLE, ["불공"], "supply")
+    nondeductible_tax = cell_total(cells, NONDEDUCTIBLE, ["불공"], "tax")
+    purchase_supply = invoice_supply + card_supply - nondeductible_supply
+    purchase_tax = invoice_tax + card_tax - nondeductible_tax
+
+    sales_labels = sum_labels(SALES, "계")
+    sales_supply = cell_total(cells, SALES, sales_labels, "supply")
+    sales_tax = d0(sales_supply * Decimal("0.1"))
+    zero_rated = cell_total(cells, SALES, ["영세"], "supply")
+    payment_taxable = cell_total(cells, PAYMENT, sum_labels(PAYMENT, "과세 계"), "total")
+    card_out_supply = u0(payment_taxable / Decimal("1.1"))
+    card_out_tax = payment_taxable - card_out_supply
+    cash_total = cell_total(cells, PAYMENT, ["현금"], "total")
+    other_supply = u0(cash_total / Decimal("1.1"))
+    other_tax = cash_total - other_supply
+    taxable_supply = sales_supply + zero_rated + card_out_supply + other_supply
+    taxable_tax = sales_tax + card_out_tax + other_tax
+    exempt_invoice = cell_total(cells, SALES, ["면세"], "supply")
+    exempt_payment = cell_total(cells, PAYMENT, EXEMPT_PAYMENT, "total")
+    exempt_total = exempt_invoice + exempt_payment
+    payable = taxable_tax - purchase_tax
+    card_deduction = (
+        max(ZERO, min(d0(payment_taxable * Decimal(13) / Decimal(1000)), payable))
+        if settings.card_deduction_eligible
+        else ZERO
+    )
+    return [
+        SummaryRow("general", "일반", invoice_supply - fixed_supply, invoice_tax - fixed_tax),
+        SummaryRow("fixed", "고정", fixed_supply, fixed_tax),
+        SummaryRow("invoice", "세금계산서 계", invoice_supply, invoice_tax),
+        SummaryRow("card", "카드", card_supply, card_tax),
+        SummaryRow("nondeductible", "불공", nondeductible_supply, nondeductible_tax),
+        SummaryRow("purchase", "매입계", purchase_supply, purchase_tax),
+        SummaryRow("sales_invoice", "세금계산서", sales_supply, sales_tax),
+        SummaryRow("zero_rated", "영세", zero_rated, ZERO),
+        SummaryRow("card_out", "카드외", card_out_supply, card_out_tax),
+        SummaryRow("other", "기타(건별)", other_supply, other_tax),
+        SummaryRow("taxable", "과세계", taxable_supply, taxable_tax),
+        SummaryRow("exempt_invoice", "면세 계산서", exempt_invoice, None),
+        SummaryRow("exempt_payment", "면세 결제", exempt_payment, None),
+        SummaryRow("exempt", "면세계", exempt_total, None),
+        SummaryRow("total_sales", "총매출", taxable_supply + exempt_total, None),
+        SummaryRow("payable", "납부(환급)세액", None, payable),
+        SummaryRow("card_deduction", "카드공제", None, card_deduction),
+        SummaryRow("final", "차감 납부할 세액", None, payable - card_deduction),
+    ]
 
 
 def _validation_row(check: str, expected: object, actual: object, *, detail: str = "") -> dict[str, object]:
     difference: object = ""
     if isinstance(expected, (int, Decimal)) and isinstance(actual, (int, Decimal)):
         difference = actual - expected
-    passed = expected == actual
     return {
         "check": check,
-        "status": "통과" if passed else "실패",
+        "status": "통과" if expected == actual else "실패",
         "expected": expected,
         "actual": actual,
         "difference": difference,
@@ -183,273 +388,111 @@ def _validation_row(check: str, expected: object, actual: object, *, detail: str
 
 
 def _information_row(check: str, value: object, *, detail: str = "") -> dict[str, object]:
-    return {
-        "check": check,
-        "status": "정보",
-        "expected": "",
-        "actual": value,
-        "difference": "",
-        "detail": detail,
-    }
+    return {"check": check, "status": "정보", "expected": "", "actual": value, "difference": "", "detail": detail}
+
+
+def _decimal_sum(frame: pd.DataFrame, column: str) -> Decimal:
+    return sum((Decimal(str(value)) for value in frame[column]), ZERO)
 
 
 def process_transactions(
     transactions: pd.DataFrame,
     settings: CompanySettings,
-    decisions: Mapping[str, Mapping[str, str]] | None = None,
+    period: Period | None = None,
 ) -> ProcessingResult:
-    decisions = decisions or {}
     data = transactions.copy()
+    if "electronic" not in data:
+        data["electronic"] = ""
     if data["row_id"].duplicated().any():
         raise ValueError("입력 상세 거래의 row_id가 중복되었습니다.")
+    profile = profile_for(settings.industry)
+    months = sorted(data["month"].dropna().astype(str).unique())
+    periods = available_periods(months)
+    period = period or default_period(months)
+    period_months = set(period.months) if period else set()
 
-    categories: list[str] = []
-    candidates: list[str] = []
-    review_statuses: list[str] = []
-    final_types: list[str] = []
-    nondeductible_reasons: list[str] = []
-    memos: list[str] = []
-    for _, row in data.iterrows():
-        category = ""
-        if row["division"] == "매입" and row["original_type"] in PURCHASE_TAX_TYPES:
-            category = classify_purchase_account(row["account_code"], settings)
-            if (
-                category == settings.account_146_label
-                and str(row["account_code"]).strip() not in settings.account_overrides
-                and _matches_keyword(row["vendor"], settings.tobacco_vendor_keywords)
-            ):
-                category = "담배"
-        candidate = find_nondeductible_candidate(row, settings)
-        if row["division"] == "매입" and row["original_type"] in PURCHASE_REVIEW_TYPES:
-            status, final_type, reason, memo = _decision_values(
-                row["original_type"], candidate, decisions.get(row["row_id"], {})
-            )
-        else:
-            status, final_type, reason, memo = "", row["original_type"], "", ""
-        categories.append(category)
-        candidates.append(candidate)
-        review_statuses.append(status)
-        final_types.append(final_type)
-        nondeductible_reasons.append(reason)
-        memos.append(memo)
-
-    data["account_category"] = categories
-    data["candidate_reason"] = candidates
-    data["review_status"] = review_statuses
-    data["final_type"] = final_types
-    data["nondeductible"] = data["final_type"].eq("불공")
-    data["nondeductible_reason"] = nondeductible_reasons
-    data["review_memo"] = memos
-
-    purchase = data[data["division"].eq("매입")]
-    purchase_tax = purchase[purchase["original_type"].isin(PURCHASE_TAX_TYPES)]
-    purchase_known = purchase_tax[~purchase_tax["account_category"].eq("미분류")]
-    purchase_by_category = _aggregate(purchase_known, ["account_category", "month"])
-
-    general = purchase_known[~purchase_known["account_category"].eq("고정")]
-    fixed = purchase_known[purchase_known["account_category"].eq("고정")]
-    card_tax = purchase[purchase["original_type"].eq("카과")]
-    cash_tax = purchase[purchase["original_type"].eq("현과")]
-    card_total = purchase[purchase["original_type"].isin(PURCHASE_CARD_TYPES)]
-    deemed = purchase[purchase["original_type"].isin(PURCHASE_DEEMED_TYPES)]
-    other_deductible = pd.concat([card_total, deemed], ignore_index=True)
-    taxable_purchase = pd.concat([purchase_known, other_deductible], ignore_index=True)
-    nondeductible = purchase_tax[purchase_tax["final_type"].eq("불공")]
-    common = purchase_tax[purchase_tax["final_type"].isin(PURCHASE_COMMON_TYPES)]
-    deductible = taxable_purchase[
-        ~taxable_purchase["final_type"].isin({"불공"} | PURCHASE_COMMON_TYPES)
+    data["in_period"] = data["month"].isin(period_months)
+    placements = [_place(row, settings, profile) if row["in_period"] else ("", "", "") for _, row in data.iterrows()]
+    data["block"] = [block for block, _, _ in placements]
+    data["column"] = [column for _, column, _ in placements]
+    data["override_note"] = [note for _, _, note in placements]
+    data["candidate_reason"] = [
+        find_nondeductible_candidate(row, settings) if row["in_period"] else "" for _, row in data.iterrows()
     ]
 
-    purchase_summary = _summary_rows(
-        {
-            "일반매입": general,
-            "고정": fixed,
-            "세금계산서 매입계": purchase_known,
-            "카과": card_tax,
-            "현과": cash_tax,
-            "카면": purchase[purchase["original_type"].eq("카면")],
-            "카영": purchase[purchase["original_type"].eq("카영")],
-            "현면": purchase[purchase["original_type"].eq("현면")],
-            "현영": purchase[purchase["original_type"].eq("현영")],
-            "카드매입": card_total,
-            "카드외": card_total,
-            "의제매입세액": deemed,
-            "그 밖의 공제매입세액": other_deductible,
-            "과세 매입 총계": taxable_purchase,
-            "매입세액 합계": taxable_purchase,
-            "불공": nondeductible,
-            "공통": common,
-            "면세 매입": purchase[purchase["original_type"].eq("면세")],
-            "영세 매입": purchase[purchase["original_type"].eq("영세")],
-        }
+    placed = data[data["block"].ne("")]
+    nondeductible = placed[(placed["block"] == PURCHASE) & placed["original_type"].eq("불공")].assign(
+        block=NONDEDUCTIBLE, column="불공"
     )
-    deductible_summary = _summary_rows({"과매계": deductible, "차감계": deductible})
-    purchase_summary = pd.concat([purchase_summary, deductible_summary], ignore_index=True)
+    layout, added = _build_layout(placed, profile)
+    cells = _aggregate(pd.concat([placed, nondeductible], ignore_index=True))
+    summary = _summary(cells, layout, settings)
 
-    sales = data[data["division"].eq("매출")]
-    taxable_sales = sales[sales["original_type"].isin(SALES_TAX_TYPES)]
-    invoice_taxable_sales = sales[sales["original_type"].eq("과세")]
-    invoice_exempt_sales = sales[sales["original_type"].eq("면세")]
-    zero_pay_mask = sales.apply(_is_zero_pay, axis=1)
-    zero_pay_sales = sales[sales["original_type"].eq("카과") & zero_pay_mask]
-    card_taxable_sales = sales[sales["original_type"].eq("카과") & ~zero_pay_mask]
-    card_exempt_sales = sales[sales["original_type"].isin(SALES_CARD_EXEMPT_TYPES)]
-    card_sales = pd.concat([card_taxable_sales, card_exempt_sales], ignore_index=True)
-    cash_taxable_sales = sales[sales["original_type"].eq("현과")]
-    cash_exempt_sales = sales[sales["original_type"].isin(SALES_CASH_EXEMPT_TYPES)]
-    cash_sales = pd.concat([cash_taxable_sales, cash_exempt_sales], ignore_index=True)
-    sales_by_account = _aggregate(invoice_taxable_sales, ["account_name", "month"])
-    sales_summary = _summary_rows(
-        {
-            "과세매출 총계": taxable_sales,
-            "세금계산서 매출": invoice_taxable_sales,
-            "면세 매출": invoice_exempt_sales,
-            "면세 계산서 매출": invoice_exempt_sales,
-            "카드 과세": card_taxable_sales,
-            "카드 면세": card_exempt_sales,
-            "카드매출": card_sales,
-            "현영 과세": cash_taxable_sales,
-            "현영 면세": cash_exempt_sales,
-            "현영매출": cash_sales,
-            "제로페이": zero_pay_sales,
-            "기타": sales[sales["original_type"].eq("건별")],
-            "기타 면세": sales[sales["original_type"].isin({"면건"})],
-        }
-    )
-
-    review = data[
-        (data["division"].eq("매입"))
-        & (data["original_type"].isin(PURCHASE_REVIEW_TYPES))
-        & (
-            data["original_type"].eq("불공")
-            | data["candidate_reason"].ne("")
-            | data["review_status"].eq("판단 보류")
-        )
-    ].copy()
-
-    purchase_buckets = pd.concat(
-        [
-            purchase_known,
-            purchase_tax[purchase_tax["account_category"].eq("미분류")],
-            card_total,
-            deemed,
-            purchase[purchase["original_type"].isin(PURCHASE_EXEMPT_PAYMENT_TYPES)],
-            purchase[purchase["original_type"].isin(PURCHASE_OTHER_TYPES)],
-        ],
-        ignore_index=True,
-    )
-    sales_buckets = pd.concat(
-        [
-            taxable_sales,
-            invoice_exempt_sales,
-            card_exempt_sales,
-            cash_exempt_sales,
-            sales[sales["original_type"].isin(SALES_OTHER_EXEMPT_TYPES)],
-        ],
-        ignore_index=True,
-    )
-    purchase_unknown = purchase[~purchase["original_type"].isin(PURCHASE_KNOWN_TYPES)]
-    sales_unknown = sales[~sales["original_type"].isin(SALES_KNOWN_TYPES)]
-    unknown_types = sorted(
-        set(purchase_unknown["original_type"]) | set(sales_unknown["original_type"])
-    )
+    in_period = data[data["in_period"]]
+    unsupported = in_period[in_period["block"].eq("")]
+    unclassified = in_period[in_period["column"].eq("미분류")]
+    candidates = in_period[in_period["candidate_reason"].ne("")]
+    excluded = data[~data["in_period"]]
+    override_notes = sorted(set(note for note in data["override_note"] if note))
 
     rows = [
-        _information_row("상세 거래 건수", len(data)),
-        _validation_row(
-            "상세 거래 없음",
-            0,
-            int(data.empty),
-            detail="상세 거래가 한 건도 없으면 검산을 완료로 표시하지 않습니다.",
-        ),
+        _validation_row("기간 안 상세 거래 없음", 0, int(in_period.empty), detail="선택한 과세기간에 상세 거래가 없으면 실패합니다."),
         _validation_row(
             "미집계 유형 건수",
             0,
-            len(purchase_unknown) + len(sales_unknown),
+            len(unsupported),
             detail=(
-                f"어느 집계에도 들어가지 않는 유형: {', '.join(unknown_types)}"
-                if unknown_types
-                else "매입·매출 유형이 모두 집계 대상입니다."
+                f"집계할 수 없는 유형: {', '.join(sorted(set(unsupported['division'] + ' ' + unsupported['original_type'])))}"
+                if not unsupported.empty
+                else "기간 안 모든 유형이 집계 대상입니다."
             ),
         ),
-        _validation_row(
-            "매입 집계 보존 건수",
-            len(purchase),
-            len(purchase_buckets),
-            detail="매입 상세 거래가 빠짐없이 집계 대상에 들어가는지 확인합니다.",
-        ),
-        _validation_row(
-            "매입 집계 보존 공급가액",
-            _numeric_total(purchase, "supply_amount"),
-            _numeric_total(purchase_buckets, "supply_amount"),
-        ),
-        _validation_row(
-            "매입 집계 보존 세액",
-            _numeric_total(purchase, "tax_amount"),
-            _numeric_total(purchase_buckets, "tax_amount"),
-        ),
-        _validation_row(
-            "매출 집계 보존 건수",
-            len(sales),
-            len(sales_buckets),
-            detail="매출 상세 거래가 빠짐없이 집계 대상에 들어가는지 확인합니다.",
-        ),
-        _validation_row(
-            "매출 집계 보존 공급가액",
-            _numeric_total(sales, "supply_amount"),
-            _numeric_total(sales_buckets, "supply_amount"),
-        ),
-        _validation_row(
-            "매출 집계 보존 세액",
-            _numeric_total(sales, "tax_amount"),
-            _numeric_total(sales_buckets, "tax_amount"),
-        ),
-        _validation_row("과세·불공·공통 계정분류 건수", len(purchase_tax), len(purchase_known)),
-        _validation_row(
-            "과세·불공·공통 계정분류 공급가액",
-            _numeric_total(purchase_tax, "supply_amount"),
-            _numeric_total(purchase_known, "supply_amount"),
-            detail="미분류가 있으면 실패합니다.",
-        ),
-        _validation_row(
-            "과세·불공·공통 계정분류 세액",
-            _numeric_total(purchase_tax, "tax_amount"),
-            _numeric_total(purchase_known, "tax_amount"),
-        ),
-        _validation_row(
-            "과매계 관계",
-            _numeric_total(taxable_purchase, "total_amount")
-            - _numeric_total(nondeductible, "total_amount")
-            - _numeric_total(common, "total_amount"),
-            _numeric_total(
-                deductible_summary[deductible_summary["item"].eq("과매계")],
-                "total_amount",
-            ),
-            detail="매입세액 합계 - 최종 불공 - 공통",
-        ),
-        _validation_row("미분류 건수", 0, int(purchase_tax["account_category"].eq("미분류").sum())),
-        _validation_row("불공 판단 보류 건수", 0, int(review["review_status"].eq("판단 보류").sum())),
-        _information_row("공급가액 합계", _numeric_total(data, "supply_amount")),
-        _information_row("세액 합계", _numeric_total(data, "tax_amount")),
-        _information_row("합계금액 합계", _numeric_total(data, "total_amount")),
     ]
-    for month, source_month in data.groupby("month", sort=True):
-        rows.append(
-            _information_row(
-                f"{month} 합계금액",
-                _numeric_total(source_month, "total_amount"),
-            )
+    for division in ("매입", "매출"):
+        source = in_period[in_period["division"] == division]
+        kept = placed[placed["division"] == division]
+        rows.extend(
+            [
+                _validation_row(f"{division} 집계 보존 건수", len(source), len(kept)),
+                _validation_row(f"{division} 집계 보존 공급가액", _decimal_sum(source, "supply_amount"), _decimal_sum(kept, "supply_amount")),
+                _validation_row(f"{division} 집계 보존 세액", _decimal_sum(source, "tax_amount"), _decimal_sum(kept, "tax_amount")),
+            ]
         )
+    rows.append(
+        _validation_row("계정 미분류 건수", 0, len(unclassified), detail="계정코드가 비었거나 세 자리 숫자가 아닌 매입입니다.")
+    )
+    rows.extend(
+        [
+            _information_row("과세기간", period.label if period else "없음", detail=", ".join(period.months) if period else ""),
+            _information_row("기간 안 상세 거래 건수", len(in_period)),
+            _information_row(
+                "기간 밖 제외 건수",
+                len(excluded),
+                detail=", ".join(sorted(excluded["month"].astype(str).unique())),
+            ),
+            _information_row("틀에 없어 기타로 넣은 계정 예외", len(override_notes), detail=", ".join(override_notes)),
+            _information_row("틀에 없어 추가한 열·블록", len(added), detail=", ".join(added)),
+            _information_row("불공 후보 건수", len(candidates), detail="판정 없이 불공후보 시트에 목록만 표시합니다."),
+            _information_row("기간 안 공급가액 합계", _decimal_sum(in_period, "supply_amount")),
+            _information_row("기간 안 세액 합계", _decimal_sum(in_period, "tax_amount")),
+            _information_row("기간 안 합계금액 합계", _decimal_sum(in_period, "total_amount")),
+        ]
+    )
+    for month in period.months if period else []:
+        rows.append(_information_row(f"{month} 합계금액", _decimal_sum(in_period[in_period["month"] == month], "total_amount")))
     validation = pd.DataFrame(rows)
     return ProcessingResult(
         transactions=data,
-        review=review,
-        purchase_by_category=purchase_by_category,
-        purchase_summary=purchase_summary,
-        sales_by_account=sales_by_account,
-        sales_summary=sales_summary,
+        settings=settings,
+        profile=profile,
+        period=period,
+        periods=periods,
+        layout=layout,
+        cells=cells,
+        summary=summary,
+        candidates=candidates,
+        unclassified=unclassified,
         validation=validation,
-        validation_passed=bool(
-            validation.loc[validation["status"].ne("정보"), "status"].eq("통과").all()
-        ),
+        validation_passed=bool(validation.loc[validation["status"].ne("정보"), "status"].eq("통과").all()),
+        notes=added,
     )

@@ -1,290 +1,303 @@
-# 매입·매출 분류와 불공 차감 및 검산 계산을 검증합니다.
+# 업종 틀 배치·과세기간·결제 채널·요약 계산·검산을 검증합니다.
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
 import pytest
 
-from tally.core import classify_purchase_account, process_transactions
-from tally.settings import CompanySettings
+from tally import CompanySettings, Period, available_periods, default_period, process_transactions
+from tally.core import CARD, EXEMPT, NONDEDUCTIBLE, PAYMENT, PURCHASE, SALES, cell_total
 
 
 def transaction(
-    row_id: str,
+    number: int,
     division: str,
     original_type: str,
-    code: str,
-    account_name: str,
     supply: int,
     tax: int,
     *,
-    item: str = "",
-    month: str = "2026-04",
+    code: str = "",
+    name: str = "",
+    vendor: str = "거래처",
+    item: str = "품목",
+    month: int = 7,
+    total: int | None = None,
+    electronic: str = "",
 ) -> dict[str, object]:
     return {
-        "row_id": row_id,
+        "row_id": f"Sheet1:{number}",
         "sheet": "Sheet1",
-        "source_row": int(row_id[1:]),
+        "source_row": number,
         "division": division,
-        "date": date(2026, int(month[-2:]), 1),
-        "month": month,
-        "vendor": "거래처",
+        "date": date(2026, month, 1),
+        "month": f"2026-{month:02d}",
+        "vendor": vendor,
         "item": item,
         "supply_amount": Decimal(supply),
         "tax_amount": Decimal(tax),
-        "total_amount": Decimal(supply + tax),
+        "total_amount": Decimal(supply + tax if total is None else total),
         "original_type": original_type,
         "account_code": code,
-        "account_name": account_name,
+        "account_name": name,
         "card_company": "",
         "card_number": "",
+        "electronic": electronic,
     }
 
 
-def test_account_classification_uses_only_canon_rules_and_company_priority() -> None:
-    settings = CompanySettings(
-        name="업체",
-        account_146_label="음식재료",
-        fixed_asset_codes={"210"},
-        account_overrides={"899": "제조경비"},
-    )
-    assert classify_purchase_account("146", settings) == "음식재료"
-    assert classify_purchase_account("156", settings) == "원재료(도급)"
-    assert classify_purchase_account("210", settings) == "고정"
-    assert classify_purchase_account("212", settings) == "고정"
-    assert classify_purchase_account("512", settings) == "제조경비"
-    assert classify_purchase_account("612", settings) == "도급경비"
-    assert classify_purchase_account("813", settings) == "기타"
-    assert classify_purchase_account("899", settings) == "제조경비"
-    assert classify_purchase_account("499", settings) == "미분류"
+def process(rows, industry="기본", **settings):
+    return process_transactions(pd.DataFrame(rows), CompanySettings(name="업체", industry=industry, **settings))
 
 
-def test_explicit_account_override_is_not_replaced_by_tobacco_rule() -> None:
-    rows = [
-        transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-        transaction("r2", "매입", "과세", "813", "소모품", 500, 50),
+def labels(result, block):
+    return [column.label for column in result.layout[block]]
+
+
+def columns_of(result):
+    return dict(zip(result.transactions["row_id"], result.transactions["column"]))
+
+
+def check(result, name):
+    return result.validation.set_index("check").loc[name]
+
+
+def canon_example_rows():
+    return [
+        transaction(1, "매입", "과세", 1005, 100, code="146", name="원재료"),
+        transaction(2, "매입", "불공", 200, 20, code="813", name="접대비"),
+        transaction(3, "매입", "과세", 1000, 99, code="208", name="비품"),
+        transaction(4, "매입", "카과", 300, 30, code="830", name="소모품"),
+        transaction(5, "매출", "과세", 3000, 300, code="401", name="상품매출"),
+        transaction(6, "매출", "카과", 2000, 200, code="401", name="상품매출"),
+        transaction(7, "매출", "현과", 1000, 100, code="401", name="상품매출"),
+        transaction(8, "매출", "건별", 500, 50, code="401", name="상품매출"),
     ]
-    for row in rows:
-        row["vendor"] = "KT&G"
-    overridden = process_transactions(
-        pd.DataFrame(rows),
-        CompanySettings(name="업체", account_overrides={"146": "상품", "813": "상품"}),
-    )
-    default = process_transactions(pd.DataFrame(rows), CompanySettings(name="업체"))
-
-    assert overridden.transactions["account_category"].tolist() == ["상품", "상품"]
-    assert default.transactions["account_category"].tolist() == ["담배", "기타"]
 
 
-def test_processing_keeps_nondeductible_in_tax_aggregate_then_subtracts_it() -> None:
-    data = pd.DataFrame(
+def test_construction_purchase_columns_follow_canon_rules() -> None:
+    result = process(
         [
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-            transaction("r2", "매입", "불공", "813", "접대비", 200, 20),
-            transaction("r3", "매입", "카과", "", "", 300, 30),
-            transaction("r4", "매입", "현과", "", "", 400, 40),
-            transaction("r5", "매입", "면세", "", "", 500, 0),
-            transaction("r9", "매입", "공통", "813", "공통매입", 150, 15),
-            transaction("r10", "매입", "의제매입세액", "", "", 50, 5),
-            transaction("r6", "매출", "과세", "401", "상품매출", 600, 60),
-            transaction("r7", "매출", "카과", "401", "상품매출", 700, 70),
-            transaction("r8", "매출", "현과", "401", "상품매출", -100, -10),
-        ]
+            transaction(1, "매입", "과세", 100, 10, code="156"),
+            transaction(2, "매입", "과세", 100, 10, code="612"),
+            transaction(3, "매입", "과세", 100, 10, code="208"),
+            transaction(4, "매입", "과세", 100, 10, code="146"),
+            transaction(5, "매입", "과세", 100, 10, code="813"),
+            transaction(6, "매입", "과세", 100, 10, code=""),
+        ],
+        industry="건설",
     )
-    result = process_transactions(data, CompanySettings(name="업체"))
-    category_total = result.purchase_by_category["supply_amount"].sum()
-    assert category_total == Decimal(1350)
-
-    summary = result.purchase_summary.set_index("item")
-    assert summary.loc["카드외", "supply_amount"] == Decimal(700)
-    assert summary.loc["의제매입세액", "supply_amount"] == Decimal(50)
-    assert summary.loc["그 밖의 공제매입세액", "supply_amount"] == Decimal(750)
-    assert summary.loc["매입세액 합계", "supply_amount"] == Decimal(2100)
-    assert summary.loc["불공", "supply_amount"] == Decimal(200)
-    assert summary.loc["공통", "supply_amount"] == Decimal(150)
-    assert summary.loc["차감계", "supply_amount"] == Decimal(1750)
-    assert summary.loc["과매계", "supply_amount"] == Decimal(1750)
-    assert summary.loc["면세 매입", "supply_amount"] == Decimal(500)
-
-    sales = result.sales_summary.set_index("item")
-    assert sales.loc["과세매출 총계", "supply_amount"] == Decimal(1200)
-    assert sales.loc["카드매출", "total_amount"] == Decimal(770)
-    assert sales.loc["현영매출", "total_amount"] == Decimal(-110)
-    assert not result.transactions.loc[result.transactions["division"].eq("매출"), "review_status"].any()
-    assert result.validation_passed
+    assert labels(result, PURCHASE) == ["원재료", "도급", "고정", "기타", "미분류", "계"]
+    assert list(columns_of(result).values()) == ["원재료", "도급", "고정", "기타", "기타", "미분류"]
+    assert check(result, "계정 미분류 건수")["status"] == "실패"
+    assert not result.validation_passed
 
 
-def test_candidate_is_not_auto_confirmed_and_unclassified_fails_closed() -> None:
-    data = pd.DataFrame(
+def test_retail_card_purchases_split_goods_and_add_exempt_column() -> None:
+    result = process(
         [
-            transaction("r1", "매입", "과세", "499", "기타비용", 100, 10, item="개인사용"),
-        ]
+            transaction(1, "매입", "카과", 100, 10, code="146"),
+            transaction(2, "매입", "카과", 100, 10, code="830"),
+            transaction(3, "매입", "카면", 50, 0, code="830"),
+        ],
+        industry="도소매",
     )
-    result = process_transactions(data, CompanySettings(name="업체"))
-    assert result.review.iloc[0]["review_status"] == "판단 보류"
-    failures = set(result.validation.loc[result.validation["status"].eq("실패"), "check"])
-    assert failures == {
-        "과세·불공·공통 계정분류 건수",
-        "과세·불공·공통 계정분류 공급가액",
-        "과세·불공·공통 계정분류 세액",
-        "미분류 건수",
-        "불공 판단 보류 건수",
+    assert list(columns_of(result).values()) == ["카드상품", "카드기타", "카드면세"]
+    assert labels(result, CARD) == ["카드상품", "카드기타", "현영상품", "현영기타", "카드면세", "공제 계"]
+    assert "카드외 매입 · 카드면세" in check(result, "틀에 없어 추가한 열·블록")["detail"]
+    assert result.summary_value("card", "supply") == Decimal(200)
+
+
+def test_restaurant_sales_are_split_into_payment_channels() -> None:
+    result = process(
+        [
+            transaction(1, "매출", "카과", 100, 10, vendor="(주)우아한형제들"),
+            transaction(2, "매출", "카과", 100, 10, vendor="위대한상상"),
+            transaction(3, "매출", "카과", 100, 10, vendor="제로페이"),
+            transaction(4, "매출", "카과", 100, 10, vendor="일반손님"),
+            transaction(5, "매출", "현과", 100, 10),
+            transaction(6, "매출", "건별", 100, 10),
+        ],
+        industry="음식점",
+    )
+    assert list(columns_of(result).values()) == ["배민", "요기요", "제로페이", "카드", "현영", "현금"]
+    assert labels(result, PAYMENT) == ["카드", "현영", "배민", "요기요", "쿠팡이츠", "제로페이", "과세 계", "현금"]
+
+
+def test_period_choices_default_and_exclusion() -> None:
+    months = [f"2026-{month:02d}" for month in range(1, 11)]
+    assert default_period(months) == Period(2026, 2, "예정")
+    assert default_period(["2026-07", "2026-08"]) == Period(2026, 2, "예정")
+    assert default_period(["2026-04", "2026-06"]) == Period(2026, 1, "확정")
+    assert [period.label for period in available_periods(["2026-05", "2026-08"])] == [
+        "2026년 1기 확정",
+        "2026년 1기 확정(6개월)",
+        "2026년 2기 예정",
+        "2026년 2기 확정(6개월)",
+    ]
+    assert Period(2026, 2, "확정6").months == [f"2026-{month:02d}" for month in range(7, 13)]
+
+    rows = [transaction(number, "매입", "과세", 100, 10, code="146", month=number) for number in range(1, 11)]
+    result = process(rows)
+    assert result.period == Period(2026, 2, "예정")
+    assert result.transactions["in_period"].tolist() == [False] * 6 + [True] * 3 + [False]
+    assert check(result, "기간 밖 제외 건수")["actual"] == 7
+    assert cell_total(result.cells, PURCHASE, ["원재료"], "supply") == Decimal(300)
+
+    six_months = process_transactions(pd.DataFrame(rows), CompanySettings(name="업체"), Period(2026, 2, "확정6"))
+    assert cell_total(six_months.cells, PURCHASE, ["원재료"], "count") == 4
+
+
+def test_summary_matches_canon_example() -> None:
+    result = process(canon_example_rows())
+    expected = {
+        "invoice": (2205, 220),
+        "fixed": (1000, 99),
+        "general": (1205, 121),
+        "card": (300, 30),
+        "nondeductible": (200, 20),
+        "purchase": (2305, 230),
+        "sales_invoice": (3000, 300),
+        "card_out": (3000, 300),
+        "other": (500, 50),
+        "taxable": (6500, 650),
     }
-
-
-def test_candidate_decision_can_be_applied_and_negative_transaction_counts_as_one() -> None:
-    data = pd.DataFrame(
-        [transaction("r1", "매입", "과세", "822", "차량유지비", -100, -10, item="차량 수리")]
-    )
-    result = process_transactions(
-        data,
-        CompanySettings(name="업체"),
-        decisions={"r1": {"decision": "불공으로 변경", "reason": "비영업용 차량"}},
-    )
-    assert result.review.iloc[0]["final_type"] == "불공"
-    assert result.purchase_summary.set_index("item").loc["불공", "count"] == 1
-    assert result.purchase_summary.set_index("item").loc["불공", "supply_amount"] == Decimal(-100)
+    for key, (supply, tax) in expected.items():
+        assert (result.summary_value(key, "supply"), result.summary_value(key)) == (supply, tax), key
+    assert result.summary_value("payable") == 420
+    assert result.summary_value("card_deduction") == 42
+    assert result.summary_value("final") == 378
     assert result.validation_passed
 
 
-def test_unaggregated_type_fails_validation_instead_of_vanishing() -> None:
-    data = pd.DataFrame(
+@pytest.mark.parametrize(
+    ("purchase_supply", "eligible", "payable", "deduction"),
+    [(1000, True, 1100, 171), (11000, True, 100, 100), (20000, True, -800, 0), (1000, False, 1100, 0)],
+)
+def test_card_deduction_is_capped_by_payable(purchase_supply, eligible, payable, deduction) -> None:
+    result = process(
         [
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-            transaction("r2", "매입", "수입", "146", "상품", 5000, 500),
-            transaction("r3", "매출", "영세", "401", "상품매출", 8000, 0),
+            transaction(1, "매입", "과세", purchase_supply, purchase_supply // 10, code="146"),
+            transaction(2, "매출", "카과", 10000, 1000),
+            transaction(3, "매출", "현과", 1000, 100),
+            transaction(4, "매출", "카과", 1000, 100, vendor="제로페이"),
+            transaction(5, "매출", "카면", 5000, 0),
+        ],
+        card_deduction_eligible=eligible,
+    )
+    assert result.summary_value("card_out", "supply") == 12000
+    assert result.summary_value("exempt_payment", "supply") == 5000
+    assert (result.summary_value("payable"), result.summary_value("card_deduction")) == (payable, deduction)
+
+
+def test_other_sales_are_reversed_from_total_amount() -> None:
+    result = process(
+        [
+            transaction(1, "매출", "건별", 1008420, 100849),
+            transaction(2, "매출", "건별", -500, -50),
         ]
     )
-    result = process_transactions(data, CompanySettings(name="업체"))
-    validation = result.validation.set_index("check")
+    assert (result.summary_value("other", "supply"), result.summary_value("other")) == (1007927, 100792)
 
-    assert validation.loc["미집계 유형 건수", "actual"] == 2
-    assert "수입" in validation.loc["미집계 유형 건수", "detail"]
-    assert "영세" in validation.loc["미집계 유형 건수", "detail"]
-    assert validation.loc["매입 집계 보존 공급가액", "expected"] == Decimal(6000)
-    assert validation.loc["매입 집계 보존 공급가액", "actual"] == Decimal(1000)
-    assert validation.loc["매출 집계 보존 건수", "expected"] == 1
-    assert validation.loc["매출 집계 보존 건수", "actual"] == 0
+
+def test_construction_adds_payment_block_only_when_ledger_has_payment_sales() -> None:
+    without = process([transaction(1, "매출", "과세", 1000, 100, code="404", name="공사수입금")], industry="건설")
+    assert PAYMENT not in without.layout
+    with_card = process(
+        [
+            transaction(1, "매출", "과세", 1000, 100, code="404", name="공사수입금"),
+            transaction(2, "매출", "카과", 2000, 200),
+        ],
+        industry="건설",
+    )
+    assert labels(with_card, PAYMENT) == ["카드", "과세 계"]
+    assert "결제 채널 매출 블록" in check(with_card, "틀에 없어 추가한 열·블록")["detail"]
+    assert with_card.summary_value("card_out", "supply") == 2000
+
+
+def test_sales_columns_follow_account_codes_and_fixed_asset_sales() -> None:
+    result = process(
+        [
+            transaction(1, "매출", "과세", 100, 10, code="404", name="제품매출"),
+            transaction(2, "매출", "과세", 100, 10, code="401", name="회사설정계정과목"),
+            transaction(3, "매출", "과세", 100, 10, code="208", name="차량운반구"),
+            transaction(4, "매출", "영세", 100, 0, code="401", name="상품매출"),
+            transaction(5, "매출", "면세", 100, 0, code="401", name="상품매출"),
+        ]
+    )
+    assert labels(result, SALES) == ["수입금액", "제품매출", "고정", "계", "영세", "면세"]
+    assert result.summary_value("sales_invoice", "supply") == 300
+    assert result.summary_value("zero_rated", "supply") == 100
+    assert result.summary_value("exempt_invoice", "supply") == 100
+
+
+def test_nondeductible_rows_stay_in_invoice_total_and_show_separately() -> None:
+    result = process(
+        [
+            transaction(1, "매입", "과세", 1000, 100, code="146"),
+            transaction(2, "매입", "불공", 200, 20, code="813"),
+        ]
+    )
+    assert cell_total(result.cells, PURCHASE, ["기타"], "supply") == 200
+    assert cell_total(result.cells, NONDEDUCTIBLE, ["불공"], "tax") == 20
+    assert check(result, "매입 집계 보존 건수")["actual"] == 2
+    assert result.summary_value("purchase") == 100
+
+
+def test_exempt_and_zero_rated_purchases_go_to_exempt_block() -> None:
+    result = process(
+        [
+            transaction(1, "매입", "면세", 500, 0, code="146"),
+            transaction(2, "매입", "의제매입세액", 300, 0, code="830"),
+            transaction(3, "매입", "영세", 200, 0, code="146"),
+        ]
+    )
+    assert list(columns_of(result).values()) == ["원재료", "기타", "영세"]
+    assert labels(result, EXEMPT) == ["원재료", "기타", "면세 계", "영세"]
+    assert result.validation_passed
+
+
+def test_override_outside_profile_goes_to_other_with_note() -> None:
+    result = process(
+        [transaction(1, "매입", "과세", 100, 10, code="899"), transaction(2, "매입", "과세", 100, 10, code="146")],
+        industry="건설",
+        account_overrides={"899": "도급", "146": "운송경비"},
+    )
+    assert list(columns_of(result).values()) == ["도급", "기타"]
+    assert check(result, "틀에 없어 기타로 넣은 계정 예외")["detail"] == "146=운송경비"
+
+
+def test_candidates_are_listed_without_changing_aggregates() -> None:
+    result = process(
+        [
+            transaction(1, "매입", "과세", 100, 10, code="822", name="차량유지비", item="주유"),
+            transaction(2, "매입", "카과", 100, 10, code="537", name="LPG", item="주유"),
+            transaction(3, "매입", "과세", 100, 10, code="813", name="접대비"),
+            transaction(4, "매입", "과세", 100, 10, code="146", name="원재료"),
+        ]
+    )
+    assert result.candidates["row_id"].tolist() == ["Sheet1:1", "Sheet1:2", "Sheet1:3"]
+    assert result.summary_value("purchase") == 40
+    assert result.validation_passed
+
+
+def test_unsupported_type_and_empty_period_fail_validation() -> None:
+    result = process([transaction(1, "매입", "과세", 100, 10, code="146"), transaction(2, "매입", "수입", 500, 50, code="146")])
+    assert check(result, "미집계 유형 건수")["actual"] == 1
+    assert check(result, "매입 집계 보존 공급가액")["status"] == "실패"
     assert not result.validation_passed
 
-
-def test_empty_input_is_not_reported_as_verified() -> None:
-    columns = list(transaction("r1", "매입", "과세", "146", "상품", 0, 0))
-    result = process_transactions(pd.DataFrame([], columns=columns), CompanySettings(name="업체"))
-    validation = result.validation.set_index("check")
-
-    assert validation.loc["상세 거래 없음", "actual"] == 1
-    assert not result.validation_passed
+    empty = process_transactions(pd.DataFrame([transaction(1, "매입", "과세", 100, 10, month=3)]), CompanySettings(name="업체"), Period(2026, 2, "예정"))
+    assert check(empty, "기간 안 상세 거래 없음")["actual"] == 1
+    assert not empty.validation_passed
 
 
-def test_every_sample_type_stays_inside_an_aggregate() -> None:
-    data = pd.DataFrame(
-        [
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-            transaction("r2", "매입", "불공", "813", "접대비", 200, 20),
-            transaction("r3", "매입", "카과", "", "", 300, 30),
-            transaction("r4", "매입", "현과", "", "", 400, 40),
-            transaction("r5", "매입", "카면", "", "", 500, 0),
-            transaction("r6", "매입", "면세", "", "", 600, 0),
-            transaction("r7", "매입", "영세", "", "", 700, 0),
-            transaction("r8", "매출", "과세", "401", "상품매출", 800, 80),
-            transaction("r9", "매출", "건별", "401", "상품매출", 900, 90),
-            transaction("r10", "매출", "카과", "401", "상품매출", 1000, 100),
-            transaction("r11", "매출", "현과", "401", "상품매출", 1100, 110),
-            transaction("r12", "매출", "면세", "401", "상품매출", 1200, 0),
-            transaction("r13", "매출", "카면", "401", "상품매출", 1300, 0),
-            transaction("r14", "매출", "현면", "401", "상품매출", 1400, 0),
-            transaction("r15", "매출", "면건", "401", "상품매출", 1500, 0),
-        ]
-    )
-    result = process_transactions(data, CompanySettings(name="업체"))
-    validation = result.validation.set_index("check")
-
-    assert validation.loc["미집계 유형 건수", "actual"] == 0
-    assert validation.loc["매입 집계 보존 건수", "actual"] == 7
-    assert validation.loc["매출 집계 보존 건수", "actual"] == 8
-    assert result.validation_passed
-
-
-def test_information_rows_show_totals_without_deciding_validation() -> None:
-    data = pd.DataFrame(
-        [
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-            transaction("r2", "매출", "과세", "401", "상품매출", 2000, 200),
-        ]
-    )
-    result = process_transactions(data, CompanySettings(name="업체"))
-    validation = result.validation.set_index("check")
-
-    assert validation.loc["상세 거래 건수", "status"] == "정보"
-    assert validation.loc["상세 거래 건수", "actual"] == 2
-    assert validation.loc["공급가액 합계", "actual"] == Decimal(3000)
-    assert validation.loc["2026-04 합계금액", "status"] == "정보"
-    assert set(result.validation["status"]) == {"통과", "정보"}
-    assert result.validation_passed
-
-
-def test_checks_that_could_never_fail_are_gone() -> None:
-    data = pd.DataFrame([transaction("r1", "매입", "과세", "146", "상품", 1000, 100)])
-    checks = set(process_transactions(data, CompanySettings(name="업체")).validation["check"])
-
-    assert checks.isdisjoint(
-        {
-            "중복 거래",
-            "세금계산서 매입계 관계",
-            "카드매입 관계",
-            "과세 매입 총계 관계",
-            "과세매출 공급가액",
-            "카드매출 보조표",
-            "현영매출 보조표",
-        }
-    )
-
-
-def test_duplicated_row_id_stops_processing_outright() -> None:
-    data = pd.DataFrame(
-        [
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-        ]
-    )
+def test_duplicated_row_id_stops_processing() -> None:
+    rows = [transaction(1, "매입", "과세", 100, 10), transaction(1, "매입", "과세", 100, 10)]
     with pytest.raises(ValueError, match="row_id가 중복"):
-        process_transactions(data, CompanySettings(name="업체"))
+        process(rows)
 
 
-def test_zero_pay_detection_allows_intermediate_card_brand_text() -> None:
-    row = transaction("r1", "매출", "카과", "401", "상품매출", 200, 20)
-    row["vendor"] = "제로(온누리)페이"
-
-    result = process_transactions(pd.DataFrame([row]), CompanySettings(name="업체"))
-    sales = result.sales_summary.set_index("item")
-
-    assert sales.loc["제로페이", "total_amount"] == Decimal(220)
-    assert "카드매출" not in sales.index
-
-
-def test_purchase_exempt_payment_types_stay_visible_but_are_not_deducted() -> None:
-    data = pd.DataFrame(
-        [
-            transaction("r1", "매입", "과세", "146", "상품", 1000, 100),
-            transaction("r2", "매입", "카과", "", "", 300, 30),
-            transaction("r3", "매입", "현과", "", "", 400, 40),
-            transaction("r4", "매입", "카면", "", "", 500, 0),
-            transaction("r5", "매입", "카영", "", "", 100, 0),
-            transaction("r6", "매입", "현면", "", "", 200, 0),
-            transaction("r7", "매입", "현영", "", "", 50, 0),
-        ]
-    )
-
-    result = process_transactions(data, CompanySettings(name="업체"))
-    summary = result.purchase_summary.set_index("item")
-
-    assert summary.loc["카드외", "supply_amount"] == Decimal(700)
-    assert summary.loc["차감계", "supply_amount"] == Decimal(1700)
-    assert summary.loc["카면", "supply_amount"] == Decimal(500)
-    assert summary.loc["카영", "supply_amount"] == Decimal(100)
-    assert summary.loc["현면", "supply_amount"] == Decimal(200)
-    assert summary.loc["현영", "supply_amount"] == Decimal(50)
-    assert "의제매입세액" not in summary.index
-    assert "공통" not in summary.index
-    assert result.validation_passed
+def test_layout_keeps_every_month_of_the_period() -> None:
+    result = process([transaction(1, "매입", "과세", 100, 10, code="146", month=8)])
+    assert result.period.months == ["2026-07", "2026-08", "2026-09"]
+    assert set(result.cells["month"]) == {"2026-08"}

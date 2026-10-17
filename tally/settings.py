@@ -1,54 +1,40 @@
-# 업체별 계정 분류와 불공 후보 규칙을 로컬 JSON에 저장합니다.
+# 업체별 업종·계정 예외·불공 후보 키워드·카드공제 대상 여부를 로컬 JSON에 저장합니다.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 
+from .profiles import INDUSTRIES
+
+DEFAULT_VEHICLE_KEYWORDS = ["차량유지비", "주유", "수리", "타이어", "세차", "자동차"]
+DEFAULT_PERSONAL_KEYWORDS = ["개인사용", "가사용", "사적", "가사"]
+
 
 @dataclass(slots=True)
 class CompanySettings:
     name: str
-    account_146_label: str = "상품"
-    prior_period_credit: int = 0
-    card_deduction_eligible: bool = True
+    industry: str = "기본"
     fixed_asset_codes: set[str] = field(default_factory=set)
     account_overrides: dict[str, str] = field(default_factory=dict)
-    tobacco_vendor_keywords: list[str] = field(
-        default_factory=lambda: [
-            "삼양인터내셔널",
-            "케이티앤지",
-            "KT&G",
-            "제이티인터내셔널",
-            "JTI",
-            "로스만스파이스트",
-            "로스만스",
-        ]
-    )
-    vehicle_keywords: list[str] = field(
-        default_factory=lambda: ["차량유지비", "주유", "수리", "타이어", "세차", "자동차"]
-    )
+    vehicle_keywords: list[str] = field(default_factory=lambda: list(DEFAULT_VEHICLE_KEYWORDS))
     vendor_keywords: list[str] = field(default_factory=list)
-    personal_keywords: list[str] = field(
-        default_factory=lambda: ["개인사용", "가사용", "사적", "가사"]
-    )
+    personal_keywords: list[str] = field(default_factory=lambda: list(DEFAULT_PERSONAL_KEYWORDS))
+    card_deduction_eligible: bool = True
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
         if not self.name:
             raise ValueError("업체명은 비워둘 수 없습니다.")
-        if self.account_146_label not in {"상품", "음식재료"}:
-            raise ValueError("146번 표시 명칭은 상품 또는 음식재료여야 합니다.")
-        self.prior_period_credit = int(self.prior_period_credit)
-        if self.prior_period_credit < 0:
-            raise ValueError("예정미환급세액은 0 이상이어야 합니다.")
-        self.card_deduction_eligible = bool(self.card_deduction_eligible)
+        if self.industry not in INDUSTRIES:
+            raise ValueError(f"업종은 {', '.join(INDUSTRIES)} 중 하나여야 합니다.")
         self.fixed_asset_codes = {str(code).strip() for code in self.fixed_asset_codes if str(code).strip()}
         self.account_overrides = {
             str(code).strip(): str(category).strip()
             for code, category in self.account_overrides.items()
             if str(code).strip() and str(category).strip()
         }
+        self.card_deduction_eligible = bool(self.card_deduction_eligible)
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -59,28 +45,13 @@ class CompanySettings:
     def from_dict(cls, data: dict[str, object]) -> "CompanySettings":
         return cls(
             name=str(data["name"]),
-            account_146_label=str(data.get("account_146_label", "상품")),
-            prior_period_credit=int(data.get("prior_period_credit", 0)),
-            card_deduction_eligible=bool(data.get("card_deduction_eligible", True)),
+            industry=str(data.get("industry", "기본")),
             fixed_asset_codes=set(data.get("fixed_asset_codes", [])),
             account_overrides=dict(data.get("account_overrides", {})),
-            tobacco_vendor_keywords=list(
-                data.get(
-                    "tobacco_vendor_keywords",
-                    [
-                        "삼양인터내셔널",
-                        "케이티앤지",
-                        "KT&G",
-                        "제이티인터내셔널",
-                        "JTI",
-                        "로스만스파이스트",
-                        "로스만스",
-                    ],
-                )
-            ),
-            vehicle_keywords=list(data.get("vehicle_keywords", [])),
+            vehicle_keywords=list(data.get("vehicle_keywords", DEFAULT_VEHICLE_KEYWORDS)),
             vendor_keywords=list(data.get("vendor_keywords", [])),
-            personal_keywords=list(data.get("personal_keywords", [])),
+            personal_keywords=list(data.get("personal_keywords", DEFAULT_PERSONAL_KEYWORDS)),
+            card_deduction_eligible=bool(data.get("card_deduction_eligible", True)),
         )
 
 
