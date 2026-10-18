@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 import importlib
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
@@ -117,6 +118,17 @@ def test_settings_file_stays_in_app_folder_whatever_the_working_directory(tmp_pa
     reloaded = importlib.reload(tally_app)
     assert reloaded.SETTINGS_PATH == Path(reloaded.__file__).resolve().parent / "data" / "companies.json"
     assert tmp_path not in reloaded.SETTINGS_PATH.parents
+
+
+def test_executable_build_keeps_settings_next_to_the_exe(tmp_path, monkeypatch) -> None:
+    executable = tmp_path / "Tally" / "Tally.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    try:
+        assert importlib.reload(tally_app).SETTINGS_PATH == executable.resolve().parent / "data" / "companies.json"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(tally_app)
 
 
 @pytest.mark.parametrize(

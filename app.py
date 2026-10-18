@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -20,7 +21,8 @@ from tally import (
 from tally.core import BLOCK_TITLES, cell_total
 
 PROCESSING_ERRORS = (InputWorkbookError, OSError, ValueError, KeyError)
-SETTINGS_PATH = Path(__file__).resolve().parent / "data" / "companies.json"
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+SETTINGS_PATH = APP_DIR / "data" / "companies.json"
 
 
 def _error_text(exc: Exception) -> str:
