@@ -182,7 +182,7 @@ def test_card_exempt_input_moves_mixed_card_sales_to_exempt(tmp_path) -> None:
         ("건설", ["원재료(도급)", "도급", "고정", "기타", "계"], False, {"의제", "공통매입 면세사업분"}),
         ("도소매", ["상품", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
         ("음식점", ["음식재료", "고정", "기타", "계"], True, {"의제"}),
-        ("제조", ["원재료", "제조경비", "기타", "고정", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
+        ("제조", ["원재료", "제조경비", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
         ("택시", ["원재료", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
     ],
 )
@@ -201,7 +201,8 @@ def test_layout_follows_industry_frame(tmp_path, industry, purchase_headers, has
     assert labels & optional == inputs
     assert {"추가 불공", "경감·공제세액", "예정 미환급세액", "예정 고지세액", "매입자 납부특례 기납부세액", "가산세"} <= labels
     assert ("택시 경감세액" in labels) == (industry == "택시")
-    assert workbook.sheetnames == ["집계표", "전자·종이", "불공후보", "거래상세", "미분류", "검산"]
+    review = ["구분요망"] if industry == "제조" else []
+    assert workbook.sheetnames == ["집계표", "전자·종이", "불공후보", "거래상세", "미분류", *review, "검산"]
 
 
 def test_input_cells_are_green_and_empty(tmp_path) -> None:
@@ -286,6 +287,20 @@ def test_extra_payment_block_feeds_card_out_for_construction(tmp_path) -> None:
     sheet = workbook["집계표"]
     assert "결제 채널 매출" in {sheet.cell(row, 1).value for row in range(1, sheet.max_row + 1)}
     assert summary_value(sheet, "카드외", "supply") == 2000
+
+
+def test_manufacturing_review_sheet_lists_146_and_156_purchases(tmp_path) -> None:
+    rows = [
+        transaction(1, "매입", "과세", 100, 10, code="153"),
+        transaction(2, "매입", "과세", 200, 20, code="146"),
+        transaction(3, "매입", "면세", 300, 0, code="156"),
+    ]
+    _, workbook = exported(tmp_path, rows, industry="제조")
+    assert workbook.sheetnames[-2:] == ["구분요망", "검산"]
+    sheet = workbook["구분요망"]
+    assert [sheet.cell(row, 1).value for row in (4, 5, 6)] == ["Sheet1:2", "Sheet1:3", None]
+    _, basic = exported(tmp_path, rows)
+    assert "구분요망" not in basic.sheetnames
 
 
 def test_text_starting_with_equals_is_not_saved_as_formula(tmp_path) -> None:

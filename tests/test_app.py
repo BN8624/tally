@@ -51,6 +51,7 @@ class _AppStub:
     _require_current_result = tally_app.TallyApp._require_current_result
     _change_period = tally_app.TallyApp._change_period
     _save_output = tally_app.TallyApp._save_output
+    _warn_review = tally_app.TallyApp._warn_review
 
     def __init__(self, store: SettingsStore, *, file_path: str, company: str) -> None:
         self.store = store
@@ -220,6 +221,25 @@ def test_period_change_recalculates_with_processed_settings(tmp_path, monkeypatc
     assert app.result.period == Period(2026, 2, "예정")
     assert app.result.profile.name == "건설"
     assert app.refreshed == 1
+
+
+def test_manufacturing_processing_warns_about_review_purchases(tmp_path, monkeypatch) -> None:
+    recorder = _Recorder()
+    monkeypatch.setattr(tally_app, "messagebox", recorder)
+    source = _source()
+    source.loc[0, "account_code"] = "146"
+    source.loc[1, "account_code"] = "156"
+    monkeypatch.setattr(tally_app, "parse_workbook", lambda _path: source)
+    processed = CompanySettings(name="A", industry="제조")
+    app = _AppStub(_store_with(tmp_path, processed), file_path="a.xlsx", company="A")
+
+    app._process_file()
+    app.period_var.set("2026년 2기 예정")
+    app._change_period()
+
+    assert [title for title, _ in recorder.errors] == ["구분요망", "구분요망"]
+    assert "계정 146 매입이 1건" in recorder.errors[0][1]
+    assert "계정 156 매입이 1건" in recorder.errors[1][1]
 
 
 def test_processing_binds_result_to_file_company_and_settings(tmp_path, monkeypatch) -> None:

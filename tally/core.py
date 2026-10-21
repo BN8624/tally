@@ -109,6 +109,7 @@ class ProcessingResult:
     summary: list[SummaryRow]
     candidates: pd.DataFrame
     unclassified: pd.DataFrame
+    review: pd.DataFrame
     validation: pd.DataFrame
     validation_passed: bool
     notes: list[str] = field(default_factory=list)
@@ -446,6 +447,12 @@ def process_transactions(
     in_period = data[data["in_period"]]
     unsupported = in_period[in_period["block"].eq("")]
     unclassified = in_period[in_period["column"].eq("미분류")]
+    # 업종 틀에 없는 계정이라 구분이 잘못되었을 가능성이 큰 매입입니다. 계정 예외로 지정한 코드는 의도한 것으로 봅니다.
+    review = in_period[
+        in_period["division"].eq("매입")
+        & in_period["account_code"].isin(profile.review_codes)
+        & ~in_period["account_code"].isin(settings.account_overrides)
+    ]
     candidates = in_period[in_period["candidate_reason"].ne("")]
     excluded = data[~data["in_period"]]
     override_notes = sorted(set(note for note in data["override_note"] if note))
@@ -476,6 +483,18 @@ def process_transactions(
     rows.append(
         _validation_row("계정 미분류 건수", 0, len(unclassified), detail="계정코드가 비었거나 세 자리 숫자가 아닌 매입입니다.")
     )
+    if profile.review_codes:
+        rows.append(
+            _validation_row(
+                "구분요망 건수",
+                0,
+                len(review),
+                detail=(
+                    f"{profile.name} 업종에 계정 {', '.join(sorted(profile.review_codes))} 매입이 있습니다. "
+                    "계정과목 구분이 잘못되었을 수 있어 구분요망 시트에 모았습니다. 집계 위치는 바꾸지 않았습니다(세금계산서·면세매입은 기타 열)."
+                ),
+            )
+        )
     rows.extend(
         [
             _information_row("과세기간", period.label if period else "없음", detail=", ".join(period.months) if period else ""),
@@ -507,6 +526,7 @@ def process_transactions(
         summary=summary,
         candidates=candidates,
         unclassified=unclassified,
+        review=review,
         validation=validation,
         validation_passed=bool(validation.loc[validation["status"].ne("정보"), "status"].eq("통과").all()),
         notes=added,

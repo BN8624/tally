@@ -254,9 +254,23 @@ class TallyApp(tk.Tk):
             self.result_context = (file_path, company, settings.to_dict())
             self._refresh_periods()
             self._refresh_views()
+            self._warn_review()
 
         if not self._guarded("처리 실패", load):
             self.status_var.set("처리 실패. 이전 결과는 지웠습니다. 오류를 확인한 뒤 다시 처리하세요.")
+
+    def _warn_review(self) -> None:
+        review = self.result.review
+        if review.empty:
+            return
+        codes = ", ".join(sorted(set(review["account_code"])))
+        messagebox.showerror(
+            "구분요망",
+            f"{self.result.profile.name} 업종인데 계정 {codes} 매입이 {len(review):,}건 있습니다. "
+            "계정과목 구분이 잘못되었을 수 있습니다.\n"
+            "저장한 엑셀의 구분요망 시트에서 확인하세요. 의도한 계정이면 업체 설정의 계정 예외로 지정하세요.",
+            parent=self,
+        )
 
     def _clear_result(self) -> None:
         self.result = None
@@ -284,6 +298,7 @@ class TallyApp(tk.Tk):
         def recalculate() -> None:
             self.result = process_transactions(self.source_data, self.result_settings, period)
             self._refresh_views()
+            self._warn_review()
 
         self._guarded("과세기간 변경 실패", recalculate)
 

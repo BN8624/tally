@@ -494,7 +494,7 @@ DETAIL_HEADERS = [
 
 
 def export_workbook(result: ProcessingResult, output_path: str | Path) -> Path:
-    """처리 결과를 정본 CANON-10의 여섯 시트로 저장합니다."""
+    """처리 결과를 정본 CANON-10의 시트로 저장합니다. 구분요망 검사가 있는 업종은 구분요망 시트를 더합니다."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
@@ -526,6 +526,14 @@ def export_workbook(result: ProcessingResult, output_path: str | Path) -> Path:
         DETAIL_HEADERS,
         details[details["column"].eq("미분류")],
     )
+    if result.profile.review_codes:
+        _write_table_sheet(
+            workbook,
+            "구분요망",
+            f"구분요망 · 계정 {', '.join(sorted(result.profile.review_codes))} 매입, 계정과목 확인 필요",
+            DETAIL_HEADERS,
+            details.loc[result.review.index],
+        )
     validation_headers = [
         ("check", "검산 항목"),
         ("status", "상태"),

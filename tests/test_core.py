@@ -111,13 +111,25 @@ def test_manufacturing_splits_raw_material_manufacturing_cost_other_and_fixed() 
         ],
         industry="제조",
     )
-    assert labels(result, PURCHASE) == ["원재료", "제조경비", "기타", "고정", "계"]
+    assert labels(result, PURCHASE) == ["원재료", "제조경비", "고정", "기타", "계"]
     assert labels(result, EXEMPT) == ["원재료", "제조경비", "기타", "면세 계"]
     assert list(columns_of(result).values()) == [
         "원재료", "기타", "기타", "제조경비", "고정", "기타", "원재료", "제조경비", "기타",
     ]
     assert result.summary_value("deemed", "supply") == 500
-    assert result.validation_passed
+    assert list(result.review["row_id"]) == ["Sheet1:2", "Sheet1:3", "Sheet1:9"]
+    assert check(result, "구분요망 건수")["status"] == "실패"
+    assert not result.validation_passed
+
+
+def test_manufacturing_review_skips_overridden_codes_and_other_industries() -> None:
+    rows = [transaction(1, "매입", "과세", 100, 10, code="146"), transaction(2, "매출", "과세", 100, 10, code="146")]
+    overridden = process(rows, industry="제조", account_overrides={"146": "원재료"})
+    assert overridden.review.empty
+    assert check(overridden, "구분요망 건수")["status"] == "통과"
+    basic = process(rows)
+    assert basic.review.empty
+    assert "구분요망 건수" not in set(basic.validation["check"])
 
 
 def test_deemed_supply_follows_exempt_first_column_only_where_deemed_input_exists() -> None:

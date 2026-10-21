@@ -27,6 +27,7 @@ class Profile:
     taxi_relief: bool = False
     contractor_prefix: str = ""
     exempt_contractor: bool = False
+    review_codes: frozenset[str] = frozenset()
 
     @property
     def exempt_columns(self) -> tuple[str, ...]:
@@ -158,7 +159,7 @@ PROFILES: dict[str, Profile] = {
     ),
     "제조": Profile(
         name="제조",
-        purchase_columns=("원재료", "제조경비", "기타", "고정"),
+        purchase_columns=("원재료", "제조경비", "고정", "기타"),
         first_label="원재료",
         first_codes=frozenset({"153"}),
         exempt_label="원재료",
@@ -171,6 +172,7 @@ PROFILES: dict[str, Profile] = {
         inputs=frozenset({INPUT_DEEMED, INPUT_COMMON, INPUT_CARD_EXEMPT}),
         contractor_prefix="5",
         exempt_contractor=True,
+        review_codes=frozenset({"146", "156"}),
     ),
 }
 # 택시는 기본 틀을 그대로 쓰고 요약에 택시 경감세액과 그 배분만 더합니다.
