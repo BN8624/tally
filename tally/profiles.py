@@ -8,6 +8,9 @@ EXEMPT_PAYMENT = ("카드면세", "현영면세", "면세현금")
 INPUT_DEEMED = "의제"
 INPUT_COMMON = "공통매입 면세사업분"
 INPUT_CARD_EXEMPT = "카드매출 면세분"
+# 의제매입세액 계산을 위해 업종마다 세금계산서·면세 매입에 하나씩만 쓰는 상품·원재료 계정입니다.
+REVIEW_ACCOUNTS = frozenset({"146", "153", "156"})
+EXEMPT_REVIEW_TYPES = frozenset({"면세", "의제", "의제매입", "의제매입세액", "카면", "카영", "현면", "현영"})
 
 
 @dataclass(frozen=True)
@@ -27,7 +30,20 @@ class Profile:
     taxi_relief: bool = False
     contractor_prefix: str = ""
     exempt_contractor: bool = False
-    review_codes: frozenset[str] = frozenset()
+    invoice_account: str = ""
+    exempt_account: str = ""
+
+    @property
+    def reviews_accounts(self) -> bool:
+        return bool(self.invoice_account)
+
+    def needs_review(self, original_type: str, code: str) -> bool:
+        """146·153·156 중 이 업종의 세금계산서(카드 과세 포함)·면세 매입에 맞지 않는 계정인지 봅니다."""
+        code = str(code).strip()
+        if not self.reviews_accounts or code not in REVIEW_ACCOUNTS:
+            return False
+        expected = self.exempt_account if original_type in EXEMPT_REVIEW_TYPES else self.invoice_account
+        return code != expected
 
     @property
     def exempt_columns(self) -> tuple[str, ...]:
@@ -117,6 +133,8 @@ PROFILES: dict[str, Profile] = {
         exempt_codes=frozenset({"153"}),
         contractor_label="도급",
         contractor_prefix="6",
+        invoice_account="156",
+        exempt_account="153",
         card_columns=("카드", "현영"),
         payment_columns=(),
         channels=(),
@@ -131,6 +149,8 @@ PROFILES: dict[str, Profile] = {
         exempt_label="상품",
         exempt_codes=frozenset({"146"}),
         contractor_label=None,
+        invoice_account="146",
+        exempt_account="146",
         card_columns=("카드상품", "카드기타", "현영상품", "현영기타"),
         payment_columns=("카드", "현영", "오픈마켓", "제로페이", "현금", *EXEMPT_PAYMENT),
         channels=(
@@ -144,9 +164,11 @@ PROFILES: dict[str, Profile] = {
         purchase_columns=("음식재료", "고정", "기타"),
         first_label="음식재료",
         first_codes=frozenset({"146"}),
-        exempt_label="음식재료",
-        exempt_codes=frozenset({"146"}),
+        exempt_label="원재료",
+        exempt_codes=frozenset({"153"}),
         contractor_label=None,
+        invoice_account="146",
+        exempt_account="153",
         card_columns=("카과", "카면", "현과", "현면"),
         payment_columns=("카드", "현영", "배민", "요기요", "쿠팡이츠", "제로페이", "현금"),
         channels=(
@@ -172,7 +194,8 @@ PROFILES: dict[str, Profile] = {
         inputs=frozenset({INPUT_DEEMED, INPUT_COMMON, INPUT_CARD_EXEMPT}),
         contractor_prefix="5",
         exempt_contractor=True,
-        review_codes=frozenset({"146", "156"}),
+        invoice_account="153",
+        exempt_account="153",
     ),
 }
 # 택시는 기본 틀을 그대로 쓰고 요약에 택시 경감세액과 그 배분만 더합니다.

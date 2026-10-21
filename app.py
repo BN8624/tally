@@ -266,7 +266,7 @@ class TallyApp(tk.Tk):
         codes = ", ".join(sorted(set(review["account_code"])))
         messagebox.showerror(
             "구분요망",
-            f"{self.result.profile.name} 업종인데 계정 {codes} 매입이 {len(review):,}건 있습니다. "
+            f"{self.result.profile.name} 업종에 맞지 않는 계정 {codes} 매입이 {len(review):,}건 있습니다. "
             "계정과목 구분이 잘못되었을 수 있습니다.\n"
             "저장한 엑셀의 구분요망 시트에서 확인하세요. 의도한 계정이면 업체 설정의 계정 예외로 지정하세요.",
             parent=self,

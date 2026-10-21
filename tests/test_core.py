@@ -122,6 +122,48 @@ def test_manufacturing_splits_raw_material_manufacturing_cost_other_and_fixed() 
     assert not result.validation_passed
 
 
+@pytest.mark.parametrize(
+    ("industry", "flagged"),
+    [
+        ("건설", ["146 과세", "153 과세", "146 면세", "156 면세", "146 카과", "153 카과", "146 카면"]),
+        ("도소매", ["153 과세", "156 과세", "153 면세", "156 면세", "153 카과", "153 카면"]),
+        ("음식점", ["153 과세", "156 과세", "146 면세", "156 면세", "153 카과", "146 카면"]),
+        ("제조", ["146 과세", "156 과세", "146 면세", "156 면세", "146 카과", "146 카면"]),
+        ("기본", []),
+        ("택시", []),
+    ],
+)
+def test_review_flags_goods_and_raw_material_accounts_that_do_not_fit_the_industry(industry, flagged) -> None:
+    rows = [
+        transaction(number, "매입", original_type, 100, 0 if original_type in {"면세", "카면"} else 10, code=code)
+        for number, (code, original_type) in enumerate(
+            [(code, original_type) for original_type in ("과세", "면세") for code in ("146", "153", "156")]
+            + [("146", "카과"), ("153", "카과"), ("146", "카면"), ("153", "카면"), ("813", "과세")],
+            start=1,
+        )
+    ]
+    rows.append(transaction(99, "매출", "과세", 100, 10, code="153"))
+    result = process(rows, industry=industry)
+    assert [f"{row.account_code} {row.original_type}" for row in result.review.itertuples()] == flagged
+    assert ("구분요망 건수" in set(result.validation["check"])) == (industry not in {"기본", "택시"})
+
+
+def test_restaurant_exempt_raw_material_is_153_and_feeds_deemed_supply() -> None:
+    result = process(
+        [
+            transaction(1, "매입", "과세", 1000, 100, code="146"),
+            transaction(2, "매입", "면세", 500, 0, code="153"),
+        ],
+        industry="음식점",
+    )
+    assert labels(result, PURCHASE)[0] == "음식재료"
+    assert labels(result, EXEMPT) == ["원재료", "기타", "면세 계"]
+    assert list(columns_of(result).values()) == ["음식재료", "원재료"]
+    assert result.summary_value("deemed", "supply") == 500
+    assert result.review.empty
+    assert result.validation_passed
+
+
 def test_manufacturing_review_skips_overridden_codes_and_other_industries() -> None:
     rows = [transaction(1, "매입", "과세", 100, 10, code="146"), transaction(2, "매출", "과세", 100, 10, code="146")]
     overridden = process(rows, industry="제조", account_overrides={"146": "원재료"})
@@ -145,7 +187,7 @@ def test_deemed_supply_follows_exempt_first_column_only_where_deemed_input_exist
     assert keys[keys.index("card") + 1] == "deemed"
     assert process(rows, industry="기본").summary_value("deemed", "supply") == 500
     restaurant = process([*rows, transaction(4, "매입", "면세", 70, 0, code="146")], industry="음식점")
-    assert restaurant.summary_value("deemed", "supply") == 70
+    assert restaurant.summary_value("deemed", "supply") == 500
 
 
 def test_retail_card_purchases_split_goods_and_add_exempt_column() -> None:

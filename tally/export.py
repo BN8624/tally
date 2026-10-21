@@ -526,11 +526,11 @@ def export_workbook(result: ProcessingResult, output_path: str | Path) -> Path:
         DETAIL_HEADERS,
         details[details["column"].eq("미분류")],
     )
-    if result.profile.review_codes:
+    if result.profile.reviews_accounts:
         _write_table_sheet(
             workbook,
             "구분요망",
-            f"구분요망 · 계정 {', '.join(sorted(result.profile.review_codes))} 매입, 계정과목 확인 필요",
+            f"구분요망 · 계정과목 확인 필요 (세금계산서 {result.profile.invoice_account}, 면세 {result.profile.exempt_account})",
             DETAIL_HEADERS,
             details.loc[result.review.index],
         )

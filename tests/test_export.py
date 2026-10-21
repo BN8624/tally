@@ -201,7 +201,7 @@ def test_layout_follows_industry_frame(tmp_path, industry, purchase_headers, has
     assert labels & optional == inputs
     assert {"추가 불공", "경감·공제세액", "예정 미환급세액", "예정 고지세액", "매입자 납부특례 기납부세액", "가산세"} <= labels
     assert ("택시 경감세액" in labels) == (industry == "택시")
-    review = ["구분요망"] if industry == "제조" else []
+    review = ["구분요망"] if industry in {"건설", "도소매", "음식점", "제조"} else []
     assert workbook.sheetnames == ["집계표", "전자·종이", "불공후보", "거래상세", "미분류", *review, "검산"]
 
 
