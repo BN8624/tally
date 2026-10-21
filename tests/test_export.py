@@ -182,6 +182,7 @@ def test_card_exempt_input_moves_mixed_card_sales_to_exempt(tmp_path) -> None:
         ("건설", ["원재료(도급)", "도급", "고정", "기타", "계"], False, {"의제", "공통매입 면세사업분"}),
         ("도소매", ["상품", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
         ("음식점", ["음식재료", "고정", "기타", "계"], True, {"의제"}),
+        ("제조", ["원재료", "제조경비", "기타", "고정", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
         ("택시", ["원재료", "고정", "기타", "계"], True, {"의제", "공통매입 면세사업분", "카드매출 면세분(합계금액)"}),
     ],
 )
@@ -326,7 +327,7 @@ def _random_rows(rng: random.Random) -> list[dict[str, object]]:
     for _ in range(rng.randint(0, 8)):
         add("매입", rng.choice(["과세", "과세", "불공", "공통"]), rng.randint(-50, 900) * 10 + rng.randint(0, 9), rng.randint(0, 90), code=rng.choice(["146", "153", "156", "208", "512", "612", "813", "899", "", "4X"]))
     for original_type in rng.sample(["면세", "의제", "영세", "카과", "현과", "카면", "카영", "현면", "현영"], rng.randint(0, 6)):
-        add("매입", original_type, rng.randint(1, 900), 0 if original_type not in {"카과", "현과"} else rng.randint(0, 90), code=rng.choice(["146", "830"]))
+        add("매입", original_type, rng.randint(1, 900), 0 if original_type not in {"카과", "현과"} else rng.randint(0, 90), code=rng.choice(["146", "153", "512", "830"]))
     for _ in range(rng.randint(0, 4)):
         add("매출", "과세", rng.randint(1, 9000), rng.randint(0, 900), code=rng.choice(["401", "404", "208"]), name=rng.choice(["상품매출", "제품매출", "차량운반구"]))
     for original_type in rng.sample(["영세", "면세", "카과", "카과", "현과", "건별", "카면", "카영", "현면", "현영", "면건"], rng.randint(0, 7)):
@@ -359,7 +360,7 @@ def test_random_ledgers_render_without_overlap_and_formulas_match(monkeypatch) -
             continue
         writes.clear()
         merges.clear()
-        settings = CompanySettings(name="배치검사", industry=rng.choice(["기본", "건설", "도소매", "음식점", "택시"]), card_deduction_eligible=rng.random() < 0.5)
+        settings = CompanySettings(name="배치검사", industry=rng.choice(["기본", "건설", "도소매", "음식점", "제조", "택시"]), card_deduction_eligible=rng.random() < 0.5)
         result = process_transactions(pd.DataFrame(rows), settings, Period(2026, 2, "예정"))
         workbook = Workbook()
         _build_summary_sheet(workbook, result)

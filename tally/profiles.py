@@ -25,9 +25,13 @@ class Profile:
     sales_exempt_fixed: bool
     inputs: frozenset[str]
     taxi_relief: bool = False
+    contractor_prefix: str = ""
+    exempt_contractor: bool = False
 
     @property
     def exempt_columns(self) -> tuple[str, ...]:
+        if self.exempt_contractor and self.contractor_label:
+            return (self.exempt_label, self.contractor_label, "기타")
         return (self.exempt_label, "기타")
 
     def purchase_column(self, code: str, fixed_codes: set[str], overrides: dict[str, str]) -> tuple[str, str]:
@@ -46,16 +50,20 @@ class Profile:
             return "고정", ""
         if code in self.first_codes:
             return self.first_label, ""
-        if self.contractor_label and code.startswith("6"):
+        if self.contractor_label and code.startswith(self.contractor_prefix):
             return self.contractor_label, ""
         return "기타", ""
 
     def exempt_column(self, code: str, overrides: dict[str, str]) -> str:
         code = str(code).strip()
-        if overrides.get(code) == self.exempt_label or code in self.exempt_codes:
+        if overrides.get(code) in self.exempt_columns:
+            return overrides[code]
+        if code in self.exempt_codes:
             return self.exempt_label
         if not (len(code) == 3 and code.isdigit()):
             return "미분류"
+        if self.exempt_contractor and self.contractor_label and code.startswith(self.contractor_prefix):
+            return self.contractor_label
         return "기타"
 
     def card_column(self, original_type: str, code: str) -> str:
@@ -107,6 +115,7 @@ PROFILES: dict[str, Profile] = {
         exempt_label="원재료",
         exempt_codes=frozenset({"153"}),
         contractor_label="도급",
+        contractor_prefix="6",
         card_columns=("카드", "현영"),
         payment_columns=(),
         channels=(),
@@ -146,6 +155,22 @@ PROFILES: dict[str, Profile] = {
         ),
         sales_exempt_fixed=False,
         inputs=frozenset({INPUT_DEEMED}),
+    ),
+    "제조": Profile(
+        name="제조",
+        purchase_columns=("원재료", "제조경비", "기타", "고정"),
+        first_label="원재료",
+        first_codes=frozenset({"153"}),
+        exempt_label="원재료",
+        exempt_codes=frozenset({"153"}),
+        contractor_label="제조경비",
+        card_columns=("카과", "카면", "현과", "현면"),
+        payment_columns=(*TAXABLE_PAYMENT_DEFAULT, "현금", *EXEMPT_PAYMENT),
+        channels=(),
+        sales_exempt_fixed=True,
+        inputs=frozenset({INPUT_DEEMED, INPUT_COMMON, INPUT_CARD_EXEMPT}),
+        contractor_prefix="5",
+        exempt_contractor=True,
     ),
 }
 # 택시는 기본 틀을 그대로 쓰고 요약에 택시 경감세액과 그 배분만 더합니다.
